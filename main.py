@@ -4,21 +4,22 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import gspread
 from datetime import datetime, timezone, timedelta
 import os
-from dotenv import load_dotenv
 
-# Загружаем переменные из .env
-load_dotenv()
-
-ADMIN_ID = 1885783905
-
-# Настройки
-BOT_TOKEN = "8473137069:AAHmOOOTk3J7NAuRG6lzq6cpy8ipsR1DTUA"
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1ZGtSy2eiUao5Ig08NzY9IrFaFSDr5GCjs2hV1hxhVQ8/edit?usp=sharing"
+# Импортируем настройки из config.py
+from config import BOT_TOKEN, SPREADSHEET_URL, ADMIN_ID, EMOJI_MAP, get_google_credentials
 
 # Подключение к Google Sheets
 def connect_google_sheets():
     try:
-        gc = gspread.service_account(filename='credentials.json')
+        creds_dict = get_google_credentials()
+        if creds_dict:
+            # Для продакшена - из переменных окружения
+            gc = gspread.service_account_from_dict(creds_dict)
+            print("✅ Подключение к Google Sheets через переменные окружения")
+        else:
+            # Для локальной разработки - из файла
+            gc = gspread.service_account(filename='credentials.json')
+            print("✅ Подключение к Google Sheets через файл credentials.json")
         return gc.open_by_url(SPREADSHEET_URL)
     except Exception as e:
         print(f"❌ Ошибка подключения к Google Sheets: {e}")
@@ -548,6 +549,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"❌ Ошибка в button_handler: {e}")
         await query.edit_message_text("❌ Произошла ошибка при обработке запроса")
+
+def test_connection():
+    try:
+        gc = gspread.service_account(filename='credentials.json')
+        spreadsheet = gc.open_by_url(SPREADSHEET_URL)
+        
+        students_sheet = spreadsheet.worksheet("Студенты")
+        data = students_sheet.get_all_records()
+        print("✅ Подключение успешно!")
+        print("📊 Данные студентов:")
+        for student in data:
+            print(f"  {student}")
+            
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return False
 
 def main():
     global db
