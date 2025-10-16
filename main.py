@@ -572,13 +572,10 @@ def main():
     db = connect_google_sheets()
 
     if db is None:
-        print("❌ Не удалось подключиться к таблице. Проверь credentials.json и ссылку.")
+        print("❌ Не удалось подключиться к Google Sheets")
         return
 
-    if not test_connection():
-        print("❌ Тест подключения не пройден")
-        return
-
+    # Если подключение успешно, запускаем бота
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
