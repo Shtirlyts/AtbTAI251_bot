@@ -404,6 +404,9 @@ async def mark_attendance(query, day, row_num, action, user_id):
         
     student_data = user_data[user_id]
     student_number = student_data['number']
+    
+    print(f"🎯 Пользователь {user_data[user_id]['fio']} отмечает: {day}, действие: {action}")
+    
     subgroup = student_data['subgroup']
     week_type = get_current_week_type()
     
@@ -526,22 +529,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_show_stats(query)
         elif data.startswith("day_"):
             day = data.split("_")[1]
+            print(f"📅 Пользователь {user_id} выбрал день: {day}")
             await show_subjects(query, day, user_id)
         elif data.startswith("subject_"):
             parts = data.split("_")
             day = parts[1]
-            row_num = parts[2]  # ИЗМЕНЕНИЕ: Теперь это номер строки
+            row_num = parts[2]
+            print(f"📚 Пользователь {user_id} выбрал предмет в день {day}, строка {row_num}")
             await show_subject_actions(query, day, row_num)
         elif data.startswith("action_"):
             parts = data.split("_")
             day = parts[1]
-            row_num = parts[2]  # ИЗМЕНЕНИЕ: Теперь это номер строки
+            row_num = parts[2]
             action = parts[3]
+            print(f"✅ Пользователь {user_id} отметил {action} на день {day}, строка {row_num}")
             await mark_attendance(query, day, row_num, action, user_id)
         elif data.startswith("all_"):
             parts = data.split("_")
             day = parts[1]
             action = parts[2]
+            print(f"✅ Пользователь {user_id} отметил {action} на ВСЕ предметы дня {day}")
             await mark_attendance(query, day, "all", action, user_id)
         else:
             print(f"❌ Неизвестный callback: {data}")
