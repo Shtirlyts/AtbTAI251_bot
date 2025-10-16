@@ -1,0 +1,21 @@
+# Файлы окружения
+.env
+credentials.json
+
+# Питоновские файлы
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Логи и базы данных
+*.log
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
