@@ -465,6 +465,21 @@ async def mark_attendance(query, day, row_num, action, user_id):
         print(f"❌ Ошибка в mark_attendance: {e}")
         await query.edit_message_text("❌ Ошибка при сохранении отметки")
 
+# Функция для остановки бота
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для этой команды")
+        return
+        
+    await update.message.reply_text("🛑 Бот выключается...")
+    print("🛑 Выключение бота по команде администратора")
+    
+    # Останавливаем приложение
+    import os
+    os._exit(0)
+
 # УТИЛИТЫ
 def get_current_week_type():
     return "Знаменатель - 8 неделя"
@@ -588,6 +603,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
     application.add_handler(CallbackQueryHandler(button_handler))
 
