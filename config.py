@@ -13,27 +13,12 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "1885783905"))
 # Настройки эмодзи для отметок
 EMOJI_MAP = {
     'present': '✅',
-    'absent': '❌', 
+    'absent': '❌',
     'excused': '⚠️'
 }
 
 def get_google_credentials():
     """Загружает credentials из переменной окружения"""
-    creds_base64 = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_base64:
-        try:
-            creds_json = base64.b64decode(creds_base64).decode()
-            return json.loads(creds_json)
-        except Exception as e:
-            print(f"❌ Ошибка декодирования credentials: {e}")
-            return None
-    return None
-
-def get_google_credentials():
-    """Загружает credentials из переменной окружения"""
-    import base64
-    import json
-    
     creds_base64 = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if creds_base64:
         try:
