@@ -4,9 +4,21 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import gspread
 from datetime import datetime, timezone, timedelta
 import os
+import logging
 
 # Импортируем настройки из config.py
 from config import BOT_TOKEN, SPREADSHEET_URL, ADMIN_ID, EMOJI_MAP, get_google_credentials
+
+# Настройка логирования в файл
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/root/AtbTAI251_bot/bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Подключение к Google Sheets
 def connect_google_sheets():
@@ -15,14 +27,14 @@ def connect_google_sheets():
         if creds_dict:
             # Для продакшена - из переменных окружения
             gc = gspread.service_account_from_dict(creds_dict)
-            print("✅ Подключение к Google Sheets через переменные окружения")
+            logger.info("✅ Подключение к Google Sheets через переменные окружения")
         else:
             # Для локальной разработки - из файла
             gc = gspread.service_account(filename='credentials.json')
-            print("✅ Подключение к Google Sheets через файл credentials.json")
+            logger.info("✅ Подключение к Google Sheets через файл credentials.json")
         return gc.open_by_url(SPREADSHEET_URL)
     except Exception as e:
-        print(f"❌ Ошибка подключения к Google Sheets: {e}")
+        logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
         return None
 
 # Глобальные переменные
@@ -32,34 +44,39 @@ user_states = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    print(f"🟢 Получен /start от пользователя {user_id}")
+    username = update.effective_user.username or "Без username"
+    logger.info(f"🟢 Команда /start от пользователя {user_id} (@{username})")
     
     user_states[user_id] = "waiting_for_fio"
     
     await update.message.reply_text(
         "Добро пожаловать! Введите ваше ФИО (Фамилия Имя Отчество):"
     )
-    print("✅ Сообщение отправлено пользователю")
+    logger.info(f"✅ Пользователю {user_id} отправлен запрос ФИО")
 
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
     text = update.message.text
-    print(f"📨 Сообщение от {user_id}: {text}")
+    logger.info(f"📨 Сообщение от {user_id} (@{username}): {text}")
     
     if user_states.get(user_id) == "waiting_for_fio":
         await handle_fio(update, context)
     else:
+        logger.warning(f"⚠️ Пользователь {user_id} отправил сообщение без регистрации: {text}")
         await update.message.reply_text("Сначала отправьте /start для регистрации")
 
 async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db is None:
+        logger.error("❌ Попытка регистрации при отсутствующем подключении к БД")
         await update.message.reply_text("❌ Ошибка подключения к базе данных. Попробуйте позже.")
         return
         
     fio = update.message.text.strip()
     user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
     
-    print(f"🔍 Поиск ФИО: {fio} для пользователя {user_id}")
+    logger.info(f"🔍 Поиск ФИО: '{fio}' для пользователя {user_id} (@{username})")
     
     try:
         students_sheet = db.worksheet("Студенты")
@@ -71,10 +88,11 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for student in students_data:
             if student['ФИО'].lower() == fio.lower():
-                print(f"✅ Найден студент: {student}")
+                logger.info(f"✅ Найден студент: {student}")
                 
                 existing_id = str(student.get('Telegram ID', '')).strip()
                 if existing_id and existing_id.isdigit() and int(existing_id) != user_id:
+                    logger.warning(f"⚠️ Попытка повторной регистрации ФИО '{fio}' пользователем {user_id} (уже зарегистрирован на {existing_id})")
                     await update.message.reply_text("❌ Этот аккаунт уже зарегистрирован на другого пользователя!")
                     return
                 else:
@@ -84,13 +102,14 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
         
         if not user_found:
+            logger.warning(f"❌ ФИО '{fio}' не найдено в базе для пользователя {user_id}")
             await update.message.reply_text("❌ ФИО не найдено в базе! Обратитесь к администратору.")
             return
         
         # Сохраняем Telegram ID
         cell = students_sheet.find(str(student_number))
         students_sheet.update_cell(cell.row, 4, str(user_id))
-        print(f"✅ Сохранен Telegram ID {user_id} для студента №{student_number}")
+        logger.info(f"✅ Сохранен Telegram ID {user_id} для студента №{student_number} ({fio})")
         
         user_data[user_id] = {
             'fio': fio,
@@ -116,19 +135,23 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Подгруппа: {subgroup}\n",
             reply_markup=reply_markup
         )
-        print("✅ Регистрация завершена, кнопки отправлены")
+        logger.info(f"✅ Регистрация завершена для пользователя {user_id} (@{username}): {fio}, подгруппа {subgroup}")
         
     except Exception as e:
-        print(f"❌ Ошибка в handle_fio: {e}")
+        logger.error(f"❌ Ошибка в handle_fio для пользователя {user_id}: {e}")
         await update.message.reply_text("❌ Произошла ошибка при регистрации. Попробуйте позже.")
 
 # АДМИН-ФУНКЦИИ
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
     
     if user_id != ADMIN_ID:
+        logger.warning(f"⚠️ Попытка доступа к админ-панели пользователем {user_id} (@{username})")
         await update.message.reply_text("❌ У вас нет доступа к админ-панели")
         return
+    
+    logger.info(f"🛠️ Открытие админ-панели пользователем {user_id} (@{username})")
     
     keyboard = [
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
@@ -141,6 +164,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛠️ Админ-панель:", reply_markup=reply_markup)
 
 async def admin_show_students(query):
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    
+    logger.info(f"👥 Запрос списка студентов администратором {user_id} (@{username})")
+    
     try:
         students_sheet = db.worksheet("Студенты")
         students_data = students_sheet.get_all_records()
@@ -156,10 +184,17 @@ async def admin_show_students(query):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(text, reply_markup=reply_markup)
+        logger.info(f"✅ Список студентов отправлен администратору {user_id}")
     except Exception as e:
+        logger.error(f"❌ Ошибка при получении списка студентов администратором {user_id}: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
 async def admin_reset_registration(query):
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    
+    logger.warning(f"🔄 Сброс регистраций администратором {user_id} (@{username})")
+    
     try:
         students_sheet = db.worksheet("Студенты")
         students_sheet.batch_clear(["D2:D100"])
@@ -173,10 +208,17 @@ async def admin_reset_registration(query):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text("✅ Регистрации всех студентов сброшены!", reply_markup=reply_markup)
+        logger.info(f"✅ Регистрации сброшены администратором {user_id}")
     except Exception as e:
+        logger.error(f"❌ Ошибка при сбросе регистраций администратором {user_id}: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
 async def admin_show_stats(query):
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    
+    logger.info(f"📊 Запрос статистики администратором {user_id} (@{username})")
+    
     try:
         students_sheet = db.worksheet("Студенты")
         students_data = students_sheet.get_all_records()
@@ -196,10 +238,17 @@ async def admin_show_stats(query):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(text, reply_markup=reply_markup)
+        logger.info(f"✅ Статистика отправлена администратору {user_id}: {registered}/{total} зарегистрировано")
     except Exception as e:
+        logger.error(f"❌ Ошибка при получении статистики администратором {user_id}: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
 async def admin_confirm_reset(query):
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    
+    logger.warning(f"⚠️ Подтверждение сброса регистраций администратором {user_id} (@{username})")
+    
     keyboard = [
         [
             InlineKeyboardButton("✅ Да, сбросить", callback_data="admin_reset_yes"),
@@ -215,17 +264,24 @@ async def admin_confirm_reset(query):
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 async def handle_mark_complete(query, user_id):
+    username = query.from_user.username or "Без username"
+    logger.info(f"🏁 Завершение отметки пользователем {user_id} (@{username})")
     # ИЗМЕНЕНИЕ: Просто возвращаем к дням недели без сообщения
     await show_days_with_status(query, user_id)
 
 async def show_days_with_status(query, user_id):
     if user_id not in user_data:
+        logger.warning(f"⚠️ Попытка отметки незарегистрированным пользователем {user_id}")
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
         
-    subgroup = user_data[user_id]['subgroup']
-    student_number = user_data[user_id]['number']
+    username = query.from_user.username or "Без username"
+    student_data = user_data[user_id]
+    subgroup = student_data['subgroup']
+    student_number = student_data['number']
     week_type = get_current_week_type()
+    
+    logger.info(f"📅 Показ дней недели для пользователя {user_id} (@{username}): {student_data['fio']}")
     
     try:
         schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
@@ -278,11 +334,16 @@ async def show_days_with_status(query, user_id):
             "❌ - пары не отмечены",
             reply_markup=reply_markup
         )
+        logger.info(f"✅ Дни недели с статусом отправлены пользователю {user_id}")
     except Exception as e:
-        print(f"❌ Ошибка в show_days_with_status: {e}")
+        logger.error(f"❌ Ошибка в show_days_with_status для пользователя {user_id}: {e}")
         await show_days(query)
 
 async def show_days(query):
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    logger.info(f"📅 Показ дней недели пользователю {user_id} (@{username})")
+    
     days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница"]
     keyboard = []
     
@@ -294,12 +355,17 @@ async def show_days(query):
 
 async def show_subjects(query, day, user_id):
     if user_id not in user_data:
+        logger.warning(f"⚠️ Попытка просмотра предметов незарегистрированным пользователем {user_id}")
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
         
-    subgroup = user_data[user_id]['subgroup']
-    student_number = user_data[user_id]['number']
+    username = query.from_user.username or "Без username"
+    student_data = user_data[user_id]
+    subgroup = student_data['subgroup']
+    student_number = student_data['number']
     week_type = get_current_week_type()
+    
+    logger.info(f"📚 Показ предметов для {day} пользователю {user_id} (@{username}): {student_data['fio']}")
     
     try:
         schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
@@ -343,6 +409,7 @@ async def show_subjects(query, day, user_id):
             subjects_with_status.append((subject, button_text, status, row_num))
         
         if not subjects_with_status:
+            logger.info(f"ℹ️ На {day} ({week_type}) нет занятий для пользователя {user_id}")
             await query.edit_message_text(f"❌ На {day} ({week_type}) нет занятий")
             return
             
@@ -374,11 +441,16 @@ async def show_subjects(query, day, user_id):
             f"📚 {day} - {week_type}:\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
             reply_markup=reply_markup
         )
+        logger.info(f"✅ Предметы для {day} отправлены пользователю {user_id}")
     except Exception as e:
-        print(f"❌ Ошибка в show_subjects: {e}")
+        logger.error(f"❌ Ошибка в show_subjects для пользователя {user_id}: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
 async def show_subject_actions(query, day, row_num):
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    logger.info(f"🎯 Показ действий для предмета (день: {day}, строка: {row_num}) пользователю {user_id}")
+    
     try:
         keyboard = [
             [
@@ -394,23 +466,23 @@ async def show_subject_actions(query, day, row_num):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Выберите действие для отметки:", reply_markup=reply_markup)
     except Exception as e:
-        print(f"❌ Ошибка в show_subject_actions: {e}")
+        logger.error(f"❌ Ошибка в show_subject_actions для пользователя {user_id}: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке действий")
 
 async def mark_attendance(query, day, row_num, action, user_id):
     if user_id not in user_data:
+        logger.warning(f"⚠️ Попытка отметки незарегистрированным пользователем {user_id}")
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
         
     student_data = user_data[user_id]
     student_number = student_data['number']
+    username = query.from_user.username or "Без username"
     
-    print(f"🎯 Пользователь {user_data[user_id]['fio']} отмечает: {day}, действие: {action}")
+    logger.info(f"🎯 Отметка пользователем {user_id} (@{username}): {student_data['fio']}, день: {day}, действие: {action}, строка: {row_num}")
     
     subgroup = student_data['subgroup']
     week_type = get_current_week_type()
-    
-    print(f"🎯 Отмечаем: {day}, строка: {row_num}, действие: {action}")
     
     try:
         emoji_map = {
@@ -432,7 +504,7 @@ async def mark_attendance(query, day, row_num, action, user_id):
                 break
         
         if student_col is None:
-            print(f"❌ Не найден столбец для студента {student_number}")
+            logger.error(f"❌ Не найден столбец для студента {student_number} (пользователь {user_id})")
             await query.edit_message_text("❌ Ошибка: студент не найден в таблице посещаемости")
             return
         
@@ -446,35 +518,39 @@ async def mark_attendance(query, day, row_num, action, user_id):
                     if student_col <= len(row):
                         schedule_sheet.update_cell(i, student_col, mark)
                         updated_count += 1
-                        print(f"✅ Отметка {mark} для всех предметов, строка {i}")
             
             if updated_count > 0:
+                logger.info(f"✅ Массовая отметка {mark} для дня {day} пользователем {user_id}: обновлено {updated_count} записей")
                 await show_subjects(query, day, user_id)
             else:
+                logger.warning(f"⚠️ Не удалось обновить отметки для дня {day} пользователем {user_id}")
                 await query.edit_message_text("❌ Не удалось сохранить отметку")
         else:
             # Отметка на конкретном предмете
             row_num_int = int(row_num)
             schedule_sheet.update_cell(row_num_int, student_col, mark)
-            print(f"✅ Отметка {mark} для строки {row_num_int}, столбец {student_col}")
+            
+            logger.info(f"✅ Отметка {mark} для строки {row_num_int}, столбец {student_col} пользователем {user_id}")
             
             # ИЗМЕНЕНИЕ: После отметки сразу возвращаем к списку предметов дня
             await show_subjects(query, day, user_id)
             
     except Exception as e:
-        print(f"❌ Ошибка в mark_attendance: {e}")
+        logger.error(f"❌ Ошибка в mark_attendance для пользователя {user_id}: {e}")
         await query.edit_message_text("❌ Ошибка при сохранении отметки")
 
 # Функция для остановки бота
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
     
     if user_id != ADMIN_ID:
+        logger.warning(f"⚠️ Попытка остановки бота пользователем {user_id} (@{username})")
         await update.message.reply_text("❌ У вас нет прав для этой команды")
         return
         
+    logger.critical(f"🛑 Выключение бота по команде администратора {user_id} (@{username})")
     await update.message.reply_text("🛑 Бот выключается...")
-    print("🛑 Выключение бота по команде администратора")
     
     # Останавливаем приложение
     import os
@@ -486,6 +562,10 @@ def get_current_week_type():
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
+    
+    logger.info(f"📊 Запрос статуса пользователем {user_id} (@{username})")
+    
     if user_id in user_data:
         student_data = user_data[user_id]
         await update.message.reply_text(
@@ -504,9 +584,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
     data = query.data
     
-    print(f"🔄 Обработка callback: {data} от пользователя {user_id}")
+    logger.info(f"🔄 Обработка callback: {data} от пользователя {user_id} (@{username})")
     
     try:
         if data == "mark_attendance":
@@ -522,11 +603,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text("Главное меню:", reply_markup=reply_markup)
+            logger.info(f"🏠 Возврат в главное меню пользователем {user_id}")
         elif data == "admin_panel":
             if user_id == ADMIN_ID:
                 keyboard = [
                     [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
-                    [InlineKeyboardButton("❌ Сбросить регистрацию", callback_data="admin_reset_confirm")],  # Изменено
+                    [InlineKeyboardButton("❌ Сбросить регистрацию", callback_data="admin_reset_confirm")],
                     [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ]
@@ -544,32 +626,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_show_stats(query)
         elif data.startswith("day_"):
             day = data.split("_")[1]
-            print(f"📅 Пользователь {user_id} выбрал день: {day}")
+            logger.info(f"📅 Пользователь {user_id} выбрал день: {day}")
             await show_subjects(query, day, user_id)
         elif data.startswith("subject_"):
             parts = data.split("_")
             day = parts[1]
             row_num = parts[2]
-            print(f"📚 Пользователь {user_id} выбрал предмет в день {day}, строка {row_num}")
+            logger.info(f"📚 Пользователь {user_id} выбрал предмет в день {day}, строка {row_num}")
             await show_subject_actions(query, day, row_num)
         elif data.startswith("action_"):
             parts = data.split("_")
             day = parts[1]
             row_num = parts[2]
             action = parts[3]
-            print(f"✅ Пользователь {user_id} отметил {action} на день {day}, строка {row_num}")
+            logger.info(f"✅ Пользователь {user_id} отметил {action} на день {day}, строка {row_num}")
             await mark_attendance(query, day, row_num, action, user_id)
         elif data.startswith("all_"):
             parts = data.split("_")
             day = parts[1]
             action = parts[2]
-            print(f"✅ Пользователь {user_id} отметил {action} на ВСЕ предметы дня {day}")
+            logger.info(f"✅ Пользователь {user_id} отметил {action} на ВСЕ предметы дня {day}")
             await mark_attendance(query, day, "all", action, user_id)
         else:
-            print(f"❌ Неизвестный callback: {data}")
+            logger.warning(f"❌ Неизвестный callback от пользователя {user_id}: {data}")
             await query.edit_message_text("❌ Неизвестная команда")
     except Exception as e:
-        print(f"❌ Ошибка в button_handler: {e}")
+        logger.error(f"❌ Ошибка в button_handler для пользователя {user_id}: {e}")
         await query.edit_message_text("❌ Произошла ошибка при обработке запроса")
 
 def test_connection():
@@ -579,22 +661,23 @@ def test_connection():
         
         students_sheet = spreadsheet.worksheet("Студенты")
         data = students_sheet.get_all_records()
-        print("✅ Подключение успешно!")
-        print("📊 Данные студентов:")
+        logger.info("✅ Тестовое подключение успешно!")
+        logger.info("📊 Данные студентов:")
         for student in data:
-            print(f"  {student}")
+            logger.info(f"  {student}")
             
         return True
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка тестового подключения: {e}")
         return False
 
 def main():
     global db
+    logger.info("🚀 Запуск бота...")
     db = connect_google_sheets()
 
     if db is None:
-        print("❌ Не удалось подключиться к Google Sheets")
+        logger.critical("❌ Не удалось подключиться к Google Sheets")
         return
 
     # Если подключение успешно, запускаем бота
@@ -607,7 +690,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    print("🤖 Бот запускается...")
+    logger.info("🤖 Бот запускается...")
     application.run_polling()
 
 if __name__ == "__main__":
