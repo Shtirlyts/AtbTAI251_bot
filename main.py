@@ -19,6 +19,9 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+# Отключаем логирование для httpx и httpcore
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Подключение к Google Sheets
 def connect_google_sheets():
