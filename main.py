@@ -205,8 +205,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
-        [InlineKeyboardButton("❌ Сбросить регистрацию", callback_data="admin_reset_confirm")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     
@@ -238,79 +236,6 @@ async def admin_show_students(query):
     except Exception as e:
         logger.error(f"❌ Ошибка при получении списка студентов администратором {user_id}: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
-
-async def admin_reset_registration(query):
-    user_id = query.from_user.id
-    username = query.from_user.username or "Без username"
-    
-    logger.warning(f"🔄 Сброс регистраций администратором {user_id} (@{username})")
-    
-    try:
-        students_sheet = db.worksheet("Студенты")
-        students_sheet.batch_clear(["D2:D100"])
-        
-        user_data.clear()
-        user_states.clear()
-        
-        keyboard = [
-            [InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text("✅ Регистрации всех студентов сброшены!", reply_markup=reply_markup)
-        logger.info(f"✅ Регистрации сброшены администратором {user_id}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при сбросе регистраций администратором {user_id}: {e}")
-        await query.edit_message_text(f"❌ Ошибка: {e}")
-
-async def admin_show_stats(query):
-    user_id = query.from_user.id
-    username = query.from_user.username or "Без username"
-    
-    logger.info(f"📊 Запрос статистики администратором {user_id} (@{username})")
-    
-    try:
-        students_sheet = db.worksheet("Студенты")
-        students_data = students_sheet.get_all_records()
-        
-        registered = sum(1 for s in students_data if s.get('Telegram ID'))
-        total = len(students_data)
-        
-        text = f"📊 Статистика:\n\n"
-        text += f"Всего студентов: {total}\n"
-        text += f"Зарегистрировано: {registered}\n"
-        text += f"Не зарегистрировано: {total - registered}\n"
-        text += f"Процент регистрации: {registered/total*100:.1f}%"
-        
-        keyboard = [
-            [InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup)
-        logger.info(f"✅ Статистика отправлена администратору {user_id}: {registered}/{total} зарегистрировано")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при получении статистики администратором {user_id}: {e}")
-        await query.edit_message_text(f"❌ Ошибка: {e}")
-
-async def admin_confirm_reset(query):
-    user_id = query.from_user.id
-    username = query.from_user.username or "Без username"
-    
-    logger.warning(f"⚠️ Подтверждение сброса регистраций администратором {user_id} (@{username})")
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, сбросить", callback_data="admin_reset_yes"),
-            InlineKeyboardButton("❌ Нет, отмена", callback_data="admin_panel")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
-        "⚠️ Вы уверены, что хотите сбросить ВСЕ регистрации студентов?\n\n"
-        "Это действие нельзя отменить!",
-        reply_markup=reply_markup
-    )
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 async def handle_mark_complete(query, user_id):
@@ -668,12 +593,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ У вас нет доступа к админ-панели")
         elif data == "admin_students":
             await admin_show_students(query)
-        elif data == "admin_reset_confirm": 
-            await admin_confirm_reset(query)
-        elif data == "admin_reset_yes":
-            await admin_reset_registration(query)
-        elif data == "admin_stats":
-            await admin_show_stats(query)
         elif data.startswith("day_"):
             day = data.split("_")[1]
             logger.info(f"📅 Пользователь {user_id} выбрал день: {day}")
