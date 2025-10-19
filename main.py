@@ -50,12 +50,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username or "Без username"
     logger.info(f"🟢 Команда /start от пользователя {user_id} (@{username})")
     
-    user_states[user_id] = "waiting_for_fio"
-    
-    await update.message.reply_text(
-        "Добро пожаловать! Введите ваше ФИО (Фамилия Имя Отчество):"
-    )
-    logger.info(f"✅ Пользователю {user_id} отправлен запрос ФИО")
+    # Проверяем, зарегистрирован ли пользователь
+    try:
+        students_sheet = db.worksheet("Студенты")
+        students_data = students_sheet.get_all_records()
+        
+        # Ищем пользователя в базе по Telegram ID
+        user_found = False
+        student_data = None
+        
+        for student in students_data:
+            existing_id = str(student.get('Telegram ID', '')).strip()
+            if existing_id and existing_id.isdigit() and int(existing_id) == user_id:
+                user_found = True
+                student_data = {
+                    'fio': student['ФИО'],
+                    'number': student['№'],
+                    'subgroup': student['Подгруппа']
+                }
+                break
+        
+        if user_found:
+            # Пользователь уже зарегистрирован - сразу показываем меню
+            user_data[user_id] = student_data
+            user_states[user_id] = "registered"
+            
+            logger.info(f"✅ Автоматический вход для пользователя {user_id}: {student_data['fio']}")
+            
+            # Показываем главное меню
+            keyboard = []
+            keyboard.append([InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")])
+            
+            if user_id == ADMIN_ID:
+                keyboard.append([InlineKeyboardButton("🛠️ Админ-панель", callback_data="admin_panel")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"✅ С возвращением, {student_data['fio']}!\n"
+                f"Подгруппа: {student_data['subgroup']}\n",
+                reply_markup=reply_markup
+            )
+            return
+        
+        # Если пользователь не найден - просим ввести ФИО
+        user_states[user_id] = "waiting_for_fio"
+        await update.message.reply_text(
+            "Добро пожаловать! Введите ваше ФИО (Фамилия Имя Отчество):"
+        )
+        logger.info(f"✅ Пользователю {user_id} отправлен запрос ФИО")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в start для пользователя {user_id}: {e}")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
 
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
