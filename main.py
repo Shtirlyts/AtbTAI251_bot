@@ -583,8 +583,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id == ADMIN_ID:
                 keyboard = [
                     [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
-                    [InlineKeyboardButton("❌ Сбросить регистрацию", callback_data="admin_reset_confirm")],
-                    [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
