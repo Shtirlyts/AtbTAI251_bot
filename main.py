@@ -533,7 +533,27 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # УТИЛИТЫ
 def get_current_week_type():
-    return "Знаменатель - 8 неделя"
+    try:
+        # Московский часовой пояс (UTC+3)
+        moscow_tz = timezone(timedelta(hours=3))
+        now = datetime.now(moscow_tz)
+        
+        semester_start = datetime(2025, 9, 1, tzinfo=moscow_tz)
+        days_diff = (now - semester_start).days
+        week_number = (days_diff // 7) + 1
+        
+        # Определяем тип недели (четная/нечетная)
+        week_type = "Знаменатель" if week_number % 2 == 0 else "Числитель"
+        
+        result = f"{week_type} - {week_number} неделя"
+        logger.info(f"📅 Текущая неделя: {result} (дата: {now.strftime('%d.%m.%Y %H:%M')})")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в определении недели: {e}")
+        # Fallback на фиксированное значение в случае ошибки
+        return "Знаменатель - 8 неделя"
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
