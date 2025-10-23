@@ -341,6 +341,69 @@ async def admin_clear_cache_from_query(query):
     
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
+async def admin_show_status(query):
+    """Показать статус сервера"""
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ У вас нет доступа")
+        return
+    
+    log_user_action(user_id, username, "Запрос статуса сервера")
+    
+    try:
+        import psutil
+        import platform
+        
+        # Информация о системе
+        system_info = f"🖥️ **Система**: {platform.system()} {platform.release()}\n"
+        
+        # Использование CPU
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_info = f"⚡ **CPU**: {cpu_percent}%\n"
+        
+        # Использование памяти
+        memory = psutil.virtual_memory()
+        memory_info = f"💾 **Память**: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)\n"
+        
+        # Использование диска
+        disk = psutil.disk_usage('/')
+        disk_info = f"💽 **Диск**: {disk.percent}% ({disk.used//1024//1024//1024}GB/{disk.total//1024//1024//1024}GB)\n"
+        
+        # Время работы
+        boot_time = psutil.boot_time()
+        uptime = datetime.now() - datetime.fromtimestamp(boot_time)
+        uptime_info = f"⏱️ **Аптайм**: {str(uptime).split('.')[0]}\n"
+        
+        # Статистика бота
+        bot_info = f"🤖 **Пользователей**: {len(user_data)}\n"
+        bot_info += f"📊 **Кэш**: {len(cache_data)} записей\n"
+        
+        status_text = (
+            "**🖥️ Статус сервера**\n\n"
+            f"{system_info}"
+            f"{cpu_info}"
+            f"{memory_info}"
+            f"{disk_info}"
+            f"{uptime_info}"
+            f"{bot_info}"
+        )
+        
+        keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(status_text, parse_mode='Markdown', reply_markup=reply_markup)
+        
+    except Exception as e:
+        error_text = f"❌ Ошибка при получении статуса сервера: {str(e)}"
+        logger.error(error_text)
+        
+        keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(error_text, reply_markup=reply_markup)
+
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 async def show_week_selection(query, user_id):
     """Показ выбора недели"""
@@ -760,6 +823,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ У вас нет доступа к админ-панели")
         elif data == "admin_students":
             await admin_show_students(query)
+        elif data == "admin_status":
+            await admin_show_status(query)
         elif data == "admin_clear_cache":
             await admin_clear_cache_from_query(query)
         elif data == "back_to_main":
