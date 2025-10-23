@@ -56,8 +56,6 @@ def get_cached_sheet_data(sheet_name):
             logger.info(f"📦 Используем кэш для {sheet_name}")
             return data
     
-    # Если кэш устарел или отсутствует
-    logger.info(f"🔄 Обновляем кэш для {sheet_name}")
     try:
         sheet = db.worksheet(sheet_name)
         data = sheet.get_all_values()
@@ -65,11 +63,10 @@ def get_cached_sheet_data(sheet_name):
         return data
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки данных для {sheet_name}: {e}")
-        # Если ошибка, пробуем вернуть старые кэшированные данные
         if sheet_name in cache_data:
             logger.warning(f"⚠️ Используем устаревший кэш для {sheet_name}")
             return cache_data[sheet_name][0]
-        raise e
+        return []
 
 # Глобальные переменные
 db = None
@@ -393,7 +390,7 @@ async def handle_mark_complete(query, user_id):
     # ИЗМЕНЕНИЕ: Просто возвращаем к дням недели без сообщения
     await show_days_with_status(query, user_id)
 
-async def show_days_with_status(query, user_id):
+async def show_days_with_status(query, user_id, week_string=None):
     if user_id not in user_data:
         logger.warning(f"⚠️ Попытка отметки незарегистрированным пользователем {user_id}")
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
@@ -403,10 +400,8 @@ async def show_days_with_status(query, user_id):
     student_data = user_data[user_id]
     subgroup = student_data['subgroup']
     student_number = student_data['number']
-    week_type = get_current_week_type()
     
-    if not week_string:
-        week_string = get_current_week_type()
+    week_type = week_string if week_string else get_current_week_type()
     
     logger.info(f"📅 Показ дней недели для пользователя {user_id} (@{username}): {student_data['fio']}")
     
