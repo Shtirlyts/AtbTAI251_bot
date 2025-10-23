@@ -588,57 +588,142 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             if len(row) > 2 and row[0] == week_type and row[1] == day:
                 day_rows.append((row_num, row))
         
+        # Инициализируем временные данные для отметок, если их еще нет
+        if 'temp_marks' not in context.user_data:
+            context.user_data['temp_marks'] = {}
+        
+        day_key = f"{day}_{week_type}"
+        if day_key not in context.user_data['temp_marks']:
+            context.user_data['temp_marks'][day_key] = {}
+        
+        temp_marks = context.user_data['temp_marks'][day_key]
+        
         for row_num, row in day_rows:
             subject = row[2]
             subject_type = "Лекция" if "лекцион" in subject.lower() else "Практика" if "практическ" in subject.lower() else "Лабораторная" if "лабораторн" in subject.lower() else "Занятие"
             
-            status = ""
+            # Проверяем текущую отметку в таблице
+            current_mark = ""
             if student_col and len(row) > student_col:
-                mark = row[student_col].strip()
-                if mark == '✅':
-                    status = ' ✅'
-                elif mark == '❌':
-                    status = ' ❌'
-                elif mark == '⚠️':
-                    status = ' ⚠️'
+                current_mark = row[student_col].strip()
+            
+            # Используем временную отметку или текущую из таблицы
+            mark = temp_marks.get(str(row_num), current_mark)
+            
+            status = ""
+            if mark == '✅':
+                status = ' ✅'
+            elif mark == '❌':
+                status = ' ❌'
+            elif mark == '⚠️':
+                status = ' ⚠️'
             
             button_text = f"{subject_type}{status}"
-            subjects_with_status.append((subject, button_text, row_num))
+            subjects_with_status.append((subject, button_text, row_num, mark))
         
         if not subjects_with_status:
             await query.edit_message_text(f"❌ На {day} ({week_type}) нет занятий")
             return
             
         keyboard = []
-        for full_subject, button_text, row_num in subjects_with_status:
+        for full_subject, button_text, row_num, current_mark in subjects_with_status:
             keyboard.append([InlineKeyboardButton(button_text, callback_data=f"subject_{day}_{row_num}")])
         
         keyboard.append([InlineKeyboardButton("———", callback_data="separator")])
         keyboard.append([
-            InlineKeyboardButton("✅ Прис. на всех", callback_data=f"all_{day}_present"),
-            InlineKeyboardButton("❌ Отсут. на всех", callback_data=f"all_{day}_absent")
+            InlineKeyboardButton("✅ Прис. на всех", callback_data=f"temp_all_{day}_present"),
+            InlineKeyboardButton("❌ Отсут. на всех", callback_data=f"temp_all_{day}_absent")
         ])
         keyboard.append([
-            InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"all_{day}_excused")
+            InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"temp_all_{day}_excused")
         ])
         
+        # ТОЛЬКО кнопка завершить - она сохраняет все в таблицу
         keyboard.append([
             InlineKeyboardButton("🔙 Назад", callback_data="mark_attendance"),
-            InlineKeyboardButton("🏁 Завершить", callback_data="mark_complete")
+            InlineKeyboardButton("💾 Завершить", callback_data=f"finish_{day}")
         ])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        full_subjects_text = "\n".join([f"• {subject}{status}" for subject, _, status in subjects_with_status])
+        # Показываем предварительные изменения
+        preview_text = ""
+        temp_count = len([m for m in temp_marks.values() if m])
+        if temp_count > 0:
+            preview_text = f"\n📝 *Предварительные изменения: {temp_count}*"
+        
+        full_subjects_text = "\n".join([f"• {subject}{status}" for subject, _, _, status in subjects_with_status])
         
         await query.edit_message_text(
-            f"📚 {day} - {week_type}:\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
+            f"📚 {day} - {week_type}:{preview_text}\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
+            parse_mode='Markdown',
             reply_markup=reply_markup
         )
         
     except Exception as e:
         logger.error(f"❌ Ошибка в show_subjects: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
+
+async def finish_day_marks(query, day, user_id, context):
+    """Сохранить все временные отметки для дня при нажатии 'Завершить'"""
+    if user_id not in user_data:
+        await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
+        return
+        
+    student_data = user_data[user_id]
+    student_number = student_data['number']
+    username = query.from_user.username or "Без username"
+    subgroup = student_data['subgroup']
+    
+    try:
+        week_string = context.user_data.get('week_string')
+        week_type = week_string if week_string else get_current_week_type()
+        day_key = f"{day}_{week_type}"
+        
+        if 'temp_marks' not in context.user_data or day_key not in context.user_data['temp_marks']:
+            # Нет изменений - просто возвращаем назад
+            await show_days_with_status(query, user_id, week_string, context)
+            return
+        
+        temp_marks = context.user_data['temp_marks'][day_key]
+        
+        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+        header = schedule_sheet.row_values(1)
+        
+        student_col = None
+        for idx, cell in enumerate(header):
+            if str(cell).strip() == str(student_number):
+                student_col = idx + 1
+                break
+        
+        if student_col is None:
+            await query.edit_message_text("❌ Ошибка: студент не найден в таблице посещаемости")
+            return
+        
+        updated_count = 0
+        for row_num_str, mark in temp_marks.items():
+            if mark:  # Сохраняем только если есть отметка
+                row_num = int(row_num_str)
+                schedule_sheet.update_cell(row_num, student_col, mark)
+                updated_count += 1
+        
+        # Очищаем временные отметки и кэш
+        if day_key in context.user_data['temp_marks']:
+            del context.user_data['temp_marks'][day_key]
+        cache_key = f"{subgroup} подгруппа"
+        if cache_key in cache_data:
+            del cache_data[cache_key]
+        
+        log_user_action(user_id, username, "Завершение отметок", f"день: {day}, сохранено: {updated_count}")
+        
+        # Возвращаем к выбору дней с обновленными статусами
+        await show_days_with_status(query, user_id, week_string, context)
+        
+    except Exception as e:
+        error_msg = f"❌ Ошибка сохранения отметок {user_id}: {str(e)}"
+        logger.error(error_msg)
+        log_user_action(user_id, username, "ОШИБКА СОХРАНЕНИЯ", f"{day} - {str(e)}", "error")
+        await query.edit_message_text("❌ Ошибка при сохранении отметок")
 
 async def mark_attendance(query, day, row_num, action, user_id, context=None):
     if user_id not in user_data:
@@ -789,6 +874,7 @@ def get_week_info(week_offset=0):
         return None
 
 # ГЛАВНЫЙ ОБРАБОТЧИК КНОПОК
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -853,6 +939,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             day = parts[1]
             action = parts[2]
             await mark_attendance(query, day, "all", action, user_id, context)
+        elif data == "mark_complete":
+            week_string = context.user_data.get('week_string')
+            await show_days_with_status(query, user_id, week_string, context)
+        elif data.startswith("finish_"):
+            day = data.split("_")[1]
+            await finish_day_marks(query, day, user_id, context)
         elif data == "mark_complete":
             week_string = context.user_data.get('week_string')
             await show_days_with_status(query, user_id, week_string, context)
