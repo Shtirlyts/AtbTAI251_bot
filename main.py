@@ -103,7 +103,6 @@ cache_timeout = timedelta(minutes=5)
 
 def get_cached_sheet_data(sheet_name):
     """Получить данные листа с кэшированием"""
-    global cache_data
     now = datetime.now()
     
     if sheet_name in cache_data:
@@ -314,7 +313,6 @@ async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_ID:
         return
     
-    global cache_data
     cache_size = len(cache_data)
     cache_data.clear()
     logger.info("🧹 Кэш очищен администратором")
@@ -329,7 +327,6 @@ async def admin_clear_cache_from_query(query):
         await query.edit_message_text("❌ У вас нет доступа")
         return
     
-    global cache_data
     cache_size_before = len(cache_data)
     cache_data.clear()
     
@@ -350,26 +347,70 @@ async def show_week_selection(query, user_id):
         return
         
     student_data = user_data[user_id]
+    subgroup = student_data['subgroup']
     username = query.from_user.username or "Без username"
+    
     log_user_action(user_id, username, "Выбор недели для отметки")
     
     try:
-        current_week = get_current_week_type()
-        previous_week = get_week_info(-1)
+        # Получаем данные расписания для проверки наличия недель
+        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
+        
+        # Получаем информацию о неделях
+        current_week_info = get_week_info(0)  # Текущая неделя
+        previous_week_info = get_week_info(-1)  # Предыдущая неделя
         
         keyboard = []
         
-        # Текущая неделя
-        keyboard.append([InlineKeyboardButton(f"📅 {current_week}", callback_data=f"week_{current_week}")])
+        # Текущая неделя - всегда доступна
+        if current_week_info:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📅 {current_week_info['string']}", 
+                    callback_data=f"week_{current_week_info['string']}"
+                )
+            ])
         
-        # Предыдущая неделя
-        if previous_week:
-            keyboard.append([InlineKeyboardButton(f"↩️ {previous_week['string']}", callback_data=f"week_{previous_week['string']}")])
+        # Предыдущая неделя - проверяем наличие в расписании
+        if previous_week_info:
+            # Проверяем есть ли занятия на предыдущей неделе в расписании
+            week_has_classes = any(
+                len(row) > 2 and row[0] == previous_week_info['string'] 
+                for row in schedule_data[1:]  # Пропускаем заголовок
+            )
+            
+            if week_has_classes:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"↩️ {previous_week_info['string']}", 
+                        callback_data=f"week_{previous_week_info['string']}"
+                    )
+                ])
+            else:
+                # Если недели нет в расписании
+                keyboard.append([
+                    InlineKeyboardButton(
+                        "❌ Недели нет в расписании", 
+                        callback_data="week_none"
+                    )
+                ])
+        else:
+            # Если предыдущей недели не существует (например, первая неделя семестра)
+            keyboard.append([
+                InlineKeyboardButton(
+                    "❌ Недели нет", 
+                    callback_data="week_none"
+                )
+            ])
         
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Выберите неделю для отметки посещаемости:", reply_markup=reply_markup)
+        
+        await query.edit_message_text(
+            "Выберите неделю для отметки посещаемости:",
+            reply_markup=reply_markup
+        )
         
     except Exception as e:
         logger.error(f"❌ Ошибка в show_week_selection: {e}")
@@ -564,7 +605,6 @@ async def mark_attendance(query, day, row_num, action, user_id):
             
             if updated_count > 0:
                 # Очищаем кэш
-                global cache_data
                 cache_key = f"{subgroup} подгруппа"
                 if cache_key in cache_data:
                     del cache_data[cache_key]
@@ -589,7 +629,6 @@ async def mark_attendance(query, day, row_num, action, user_id):
             schedule_sheet.update_cell(row_num_int, student_col, mark)
             
             # Очищаем кэш
-            global cache_data
             cache_key = f"{subgroup} подгруппа"
             if cache_key in cache_data:
                 del cache_data[cache_key]
@@ -613,34 +652,56 @@ async def mark_attendance(query, day, row_num, action, user_id):
 # УТИЛИТЫ
 def get_current_week_type():
     try:
+        # Московский часовой пояс (UTC+3)
         moscow_tz = timezone(timedelta(hours=3))
         now = datetime.now(moscow_tz)
+        
+        # Начало семестра - 1 сентября 2025
         semester_start = datetime(2025, 9, 1, tzinfo=moscow_tz)
         days_diff = (now - semester_start).days
         week_number = (days_diff // 7) + 1
+        
+        # Определяем тип недели (четная/нечетная)
         week_type = "Знаменатель" if week_number % 2 == 0 else "Числитель"
-        return f"{week_type} - {week_number} неделя"
+        
+        result = f"{week_type} - {week_number} неделя"
+        logger.info(f"📅 Текущая неделя: {result} (дата: {now.strftime('%d.%m.%Y %H:%M')})")
+        
+        return result
+        
     except Exception as e:
         logger.error(f"❌ Ошибка в определении недели: {e}")
+        # Fallback на то, что сейчас в таблице
         return "Знаменатель - 8 неделя"
 
 def get_week_info(week_offset=0):
+    """
+    Получить информацию о неделе со смещением
+    week_offset = 0 - текущая неделя
+    week_offset = -1 - предыдущая неделя
+    """
     try:
         moscow_tz = timezone(timedelta(hours=3))
         now = datetime.now(moscow_tz)
+        
         semester_start = datetime(2025, 9, 1, tzinfo=moscow_tz)
         days_diff = (now - semester_start).days
+        
+        # Учитываем смещение
         week_number = (days_diff // 7) + 1 + week_offset
         
+        # Проверяем что неделя в пределах семестра (1-17)
         if week_number < 1 or week_number > 17:
             return None
         
         week_type = "Знаменатель" if week_number % 2 == 0 else "Числитель"
+        
         return {
             'number': week_number,
             'type': week_type,
             'string': f"{week_type} - {week_number} неделя"
         }
+        
     except Exception as e:
         logger.error(f"❌ Ошибка в определении недели: {e}")
         return None
