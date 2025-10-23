@@ -376,6 +376,11 @@ async def admin_server_status_from_query(query):
             f"**Время работы:** {get_uptime()}"
         )
         
+        keyboard = [
+            [InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await query.edit_message_text(status_text, parse_mode='Markdown')
         logger.info(f"📊 Статус сервера запрошен через панель администратором {user_id}")
         
@@ -444,7 +449,7 @@ async def show_days_with_status(query, user_id, week_string=None):
             
             keyboard.append([InlineKeyboardButton(f"{day}{status_text}", callback_data=f"day_{day}")])
         
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="mark_attendance")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
