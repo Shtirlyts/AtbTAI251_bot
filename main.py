@@ -381,7 +381,7 @@ async def admin_server_status_from_query(query):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(status_text, parse_mode='Markdown')
+        await query.edit_message_text(status_text, parse_mode='Markdown', reply_markup=reply_markup)
         logger.info(f"📊 Статус сервера запрошен через панель администратором {user_id}")
         
     except Exception as e:
