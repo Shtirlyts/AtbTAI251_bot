@@ -927,21 +927,60 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts = data.split("_")
             day = parts[1]
             row_num = parts[2]
-            await show_subject_actions(query, day, row_num)
-        elif data.startswith("action_"):
+            await show_subject_actions(query, day, row_num, context)
+        elif data.startswith("temp_mark_"):
             parts = data.split("_")
-            day = parts[1]
-            row_num = parts[2]
-            action = parts[3]
-            await mark_attendance(query, day, row_num, action, user_id, context)
-        elif data.startswith("all_"):
-            parts = data.split("_")
-            day = parts[1]
-            action = parts[2]
-            await mark_attendance(query, day, "all", action, user_id, context)
-        elif data == "mark_complete":
+            day = parts[2]
+            row_num = parts[3]
+            action = parts[4]
+            
+            # Сохраняем временную отметку
+            if 'temp_marks' not in context.user_data:
+                context.user_data['temp_marks'] = {}
+            
             week_string = context.user_data.get('week_string')
-            await show_days_with_status(query, user_id, week_string, context)
+            week_type = week_string if week_string else get_current_week_type()
+            day_key = f"{day}_{week_type}"
+            
+            if day_key not in context.user_data['temp_marks']:
+                context.user_data['temp_marks'][day_key] = {}
+            
+            emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️', 'clear': ''}
+            mark = emoji_map.get(action, '')
+            
+            context.user_data['temp_marks'][day_key][row_num] = mark
+            
+            # Возвращаем к выбору действий
+            await show_subject_actions(query, day, row_num, context)
+        elif data.startswith("temp_all_"):
+            parts = data.split("_")
+            day = parts[2]
+            action = parts[3]
+            
+            # Временная массовая отметка
+            if 'temp_marks' not in context.user_data:
+                context.user_data['temp_marks'] = {}
+            
+            week_string = context.user_data.get('week_string')
+            week_type = week_string if week_string else get_current_week_type()
+            day_key = f"{day}_{week_type}"
+            
+            if day_key not in context.user_data['temp_marks']:
+                context.user_data['temp_marks'][day_key] = {}
+            
+            emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️'}
+            mark = emoji_map.get(action, '')
+            
+            # Получаем все предметы дня
+            student_data = user_data[user_id]
+            subgroup = student_data['subgroup']
+            schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
+            
+            for row_num, row in enumerate(schedule_data[1:], start=2):
+                if len(row) > 2 and row[0] == week_type and row[1] == day:
+                    context.user_data['temp_marks'][day_key][str(row_num)] = mark
+            
+            await show_subjects(query, day, user_id, week_string, context)
         elif data.startswith("finish_"):
             day = data.split("_")[1]
             await finish_day_marks(query, day, user_id, context)
