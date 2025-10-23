@@ -425,8 +425,10 @@ async def show_days_with_status(query, user_id, week_string=None):
         
     student_data = user_data[user_id]
     subgroup = student_data['subgroup']
+    
     if week_string:
         week_type = week_string
+        context = query._context
         context.user_data['week_string'] = week_string
     else:
         week_type = get_current_week_type()
@@ -497,6 +499,8 @@ async def show_subjects(query, day, user_id, week_string=None):
     student_number = student_data['number']
     if week_string:
         week_type = week_string
+        context = query._context
+        context.user_data['week_string'] = week_string
     else:
         week_type = get_current_week_type()
     
@@ -749,6 +753,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("Эта неделя недоступна для отметки", show_alert=True)
                 return
             week_string = data[5:]
+            context.user_data['week_string'] = week_string
             await show_days_with_status(query, user_id, week_string)
         elif data.startswith("week_"):
             if data == "week_none":
