@@ -131,6 +131,8 @@ def get_cached_sheet_data(sheet_name):
 db = None
 user_data = {}
 user_states = {}
+week_cache = None
+week_cache_time = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -423,7 +425,11 @@ async def show_days_with_status(query, user_id, week_string=None):
         
     student_data = user_data[user_id]
     subgroup = student_data['subgroup']
-    week_type = week_string if week_string else get_current_week_type()
+    if week_string:
+        week_type = week_string
+        context.user_data['week_string'] = week_string
+    else:
+        week_type = get_current_week_type()
     
     try:
         schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
@@ -481,7 +487,7 @@ async def show_days_with_status(query, user_id, week_string=None):
         logger.error(f"❌ Ошибка в show_days_with_status: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
-async def show_subjects(query, day, user_id):
+async def show_subjects(query, day, user_id, week_string=None):
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -489,7 +495,10 @@ async def show_subjects(query, day, user_id):
     student_data = user_data[user_id]
     subgroup = student_data['subgroup']
     student_number = student_data['number']
-    week_type = get_current_week_type()
+    if week_string:
+        week_type = week_string
+    else:
+        week_type = get_current_week_type()
     
     username = query.from_user.username or "Без username"
     log_user_action(user_id, username, f"Просмотр предметов", f"день: {day}")
@@ -597,8 +606,10 @@ async def mark_attendance(query, day, row_num, action, user_id):
             schedule_data = schedule_sheet.get_all_values()
             updated_count = 0
             
+            current_week = get_current_week_type()
+            
             for i, row in enumerate(schedule_data[1:], start=2):
-                if len(row) > 2 and row[0] == get_current_week_type() and row[1] == day:
+                if len(row) > 2 and row[0] == current_week and row[1] == day:
                     if student_col <= len(row):
                         schedule_sheet.update_cell(i, student_col, mark)
                         updated_count += 1
@@ -651,27 +662,40 @@ async def mark_attendance(query, day, row_num, action, user_id):
 
 # УТИЛИТЫ
 def get_current_week_type():
+    """Текущая неделя с кэшированием"""
+    global week_cache, week_cache_time
+    
+    # Кэшируем на 1 минуту чтобы избежать зацикливания
+    now = datetime.now()
+    if week_cache and week_cache_time and (now - week_cache_time).seconds < 60:
+        return week_cache
+    
     try:
         # Московский часовой пояс (UTC+3)
         moscow_tz = timezone(timedelta(hours=3))
-        now = datetime.now(moscow_tz)
+        now_tz = datetime.now(moscow_tz)
         
         # Начало семестра - 1 сентября 2025
         semester_start = datetime(2025, 9, 1, tzinfo=moscow_tz)
-        days_diff = (now - semester_start).days
+        days_diff = (now_tz - semester_start).days
         week_number = (days_diff // 7) + 1
         
         # Определяем тип недели (четная/нечетная)
         week_type = "Знаменатель" if week_number % 2 == 0 else "Числитель"
         
         result = f"{week_type} - {week_number} неделя"
-        logger.info(f"📅 Текущая неделя: {result} (дата: {now.strftime('%d.%m.%Y %H:%M')})")
+        
+        # Кэшируем результат
+        week_cache = result
+        week_cache_time = now
+        
+        logger.info(f"📅 Текущая неделя: {result} (дата: {now_tz.strftime('%d.%m.%Y %H:%M')})")
         
         return result
         
     except Exception as e:
         logger.error(f"❌ Ошибка в определении недели: {e}")
-        # Fallback на то, что сейчас в таблице
+        # Fallback
         return "Знаменатель - 8 неделя"
 
 def get_week_info(week_offset=0):
@@ -726,6 +750,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             week_string = data[5:]
             await show_days_with_status(query, user_id, week_string)
+        elif data.startswith("week_"):
+            if data == "week_none":
+                await query.answer("Эта неделя недоступна для отметки", show_alert=True)
+                return
+            week_string = data[5:]
+            # Сохраняем в context
+            context.user_data['week_string'] = week_string
+            await show_days_with_status(query, user_id, week_string)
         elif data == "admin_panel":
             if user_id == ADMIN_ID:
                 keyboard = [
@@ -750,7 +782,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Главное меню:", reply_markup=reply_markup)
         elif data.startswith("day_"):
             day = data.split("_")[1]
-            await show_subjects(query, day, user_id)
+            week_string = context.user_data.get('week_string')
+            await show_subjects(query, day, user_id, week_string)
         elif data.startswith("subject_"):
             parts = data.split("_")
             day = parts[1]
