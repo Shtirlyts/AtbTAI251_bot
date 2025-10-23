@@ -577,7 +577,7 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
         logger.error(f"❌ Ошибка в show_subjects: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
-async def mark_attendance(query, day, row_num, action, user_id):
+async def mark_attendance(query, day, row_num, action, user_id, context=None):
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -627,16 +627,10 @@ async def mark_attendance(query, day, row_num, action, user_id):
                 
                 log_user_action(user_id, username, "Массовая отметка завершена", f"обновлено {updated_count} записей")
                 
-                await query.edit_message_text(
-                    f"✅ Успешно отмечено на всех предметах!\n"
-                    f"📅 День: {day}\n"
-                    f"✅ Статус: {mark}\n"
-                    f"📊 Обновлено записей: {updated_count}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📚 Вернуться к предметам", callback_data=f"day_{day}")],
-                        [InlineKeyboardButton("🏁 Завершить отметку", callback_data="mark_complete")]
-                    ])
-                )
+                # Автоматически возвращаем к списку предметов
+                week_string = context.user_data.get('week_string') if context else None
+                await show_subjects(query, day, user_id, week_string, context)
+                
             else:
                 await query.edit_message_text("❌ Не удалось сохранить отметку")
         else:
@@ -651,13 +645,9 @@ async def mark_attendance(query, day, row_num, action, user_id):
             
             log_user_action(user_id, username, "Отметка сохранена", f"строка: {row_num}, статус: {mark}")
             
-            await query.edit_message_text(
-                f"✅ Отметка сохранена!\n📅 День: {day}\n✅ Статус: {mark}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📚 Вернуться к предметам", callback_data=f"day_{day}")],
-                    [InlineKeyboardButton("🏁 Завершить отметку", callback_data="mark_complete")]
-                ])
-            )
+            # Автоматически возвращаем к списку предметов
+            week_string = context.user_data.get('week_string') if context else None
+            await show_subjects(query, day, user_id, week_string, context)
             
     except Exception as e:
         error_msg = f"❌ Ошибка отметки {user_id}: {str(e)}"
@@ -792,12 +782,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             day = parts[1]
             row_num = parts[2]
             action = parts[3]
-            await mark_attendance(query, day, row_num, action, user_id)
+            await mark_attendance(query, day, row_num, action, user_id, context)
         elif data.startswith("all_"):
             parts = data.split("_")
             day = parts[1]
             action = parts[2]
-            await mark_attendance(query, day, "all", action, user_id)
+            await mark_attendance(query, day, "all", action, user_id, context)
         elif data == "mark_complete":
             week_string = context.user_data.get('week_string')
             await show_days_with_status(query, user_id, week_string, context)
