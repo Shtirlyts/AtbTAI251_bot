@@ -418,7 +418,7 @@ async def show_week_selection(query, user_id):
         logger.error(f"❌ Ошибка в show_week_selection: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
-async def show_days_with_status(query, user_id, week_string=None):
+async def show_days_with_status(query, user_id, week_string=None, context=None):
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -428,8 +428,8 @@ async def show_days_with_status(query, user_id, week_string=None):
     
     if week_string:
         week_type = week_string
-        context = query._context
-        context.user_data['week_string'] = week_string
+        if context:
+            context.user_data['week_string'] = week_string
     else:
         week_type = get_current_week_type()
     
@@ -754,15 +754,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             week_string = data[5:]
             context.user_data['week_string'] = week_string
-            await show_days_with_status(query, user_id, week_string)
-        elif data.startswith("week_"):
-            if data == "week_none":
-                await query.answer("Эта неделя недоступна для отметки", show_alert=True)
-                return
-            week_string = data[5:]
-            # Сохраняем в context
-            context.user_data['week_string'] = week_string
-            await show_days_with_status(query, user_id, week_string)
+            await show_days_with_status(query, user_id, week_string, context)
         elif data == "admin_panel":
             if user_id == ADMIN_ID:
                 keyboard = [
@@ -806,7 +798,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             action = parts[2]
             await mark_attendance(query, day, "all", action, user_id)
         elif data == "mark_complete":
-            await show_days_with_status(query, user_id)
+            week_string = context.user_data.get('week_string')
+            await show_days_with_status(query, user_id, week_string, context)
         else:
             await query.edit_message_text("❌ Неизвестная команда")
     except Exception as e:
