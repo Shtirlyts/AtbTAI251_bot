@@ -798,11 +798,6 @@ def get_week_info(week_offset=0):
         logger.error(f"❌ Ошибка в определении недели: {e}")
         return None
 
-def get_current_week_type():
-    """Текущая неделя для обратной совместимости"""
-    week_info = get_week_info(0)
-    return week_info['string'] if week_info else "Знаменатель - 8 неделя"
-
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Без username"
@@ -841,8 +836,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             week_string = data[5:]  # Извлекаем название недели
             await show_days_with_status(query, user_id, week_string)
-        if data == "mark_attendance":
-            await show_week_selection(query, user_id)
         elif data == "admin_status":
             if user_id == ADMIN_ID:
                 await admin_server_status_from_query(query)
@@ -864,6 +857,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id == ADMIN_ID:
                 keyboard = [
                     [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
+                    [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],  # ✅ ДОБАВЛЕНО
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
