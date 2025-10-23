@@ -24,6 +24,30 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+# Настройка логирования действий пользователей
+user_actions_logger = logging.getLogger('user_actions')
+user_actions_logger.setLevel(logging.INFO)
+
+# Создаем отдельный файл для действий пользователей
+user_actions_handler = logging.FileHandler('/root/AtbTAI251_bot/user_actions.log')
+user_actions_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+user_actions_logger.addHandler(user_actions_handler)
+
+# Отключаем propagation чтобы не дублировать в основном логе
+user_actions_logger.propagate = False
+
+# Функция для логирования действий
+def log_user_action(user_id, username, action, details=""):
+    """Логирование действий пользователя"""
+    user_info = f"ID:{user_id} (@{username})"
+    log_message = f"👤 {user_info} | {action}"
+    if details:
+        log_message += f" | {details}"
+    
+    user_actions_logger.info(log_message)
+    # Также дублируем в основной лог для удобства
+    logger.info(f"📝 {log_message}")
+
 # Подключение к Google Sheets
 def connect_google_sheets():
     try:
@@ -52,19 +76,36 @@ def get_cached_sheet_data(sheet_name):
     now = datetime.now()
     if sheet_name in cache_data:
         data, timestamp = cache_data[sheet_name]
-        if now - timestamp < cache_timeout:
-            logger.info(f"📦 Используем кэш для {sheet_name}")
+        cache_age = (now - timestamp).seconds
+        
+        if cache_age < cache_timeout.total_seconds():
+            logger.info(f"📦 ИСПОЛЬЗУЕМ КЭШ для {sheet_name} (возраст: {cache_age} сек.)")
+            # Логируем использование кэша
+            user_actions_logger.info(f"🔄 ДАННЫЕ ИЗ КЭША | Лист: {sheet_name} | Возраст: {cache_age} сек.")
             return data
+        else:
+            logger.info(f"🔄 КЭШ УСТАРЕЛ для {sheet_name} (возраст: {cache_age} сек.)")
+            user_actions_logger.info(f"🔄 КЭШ УСТАРЕЛ | Лист: {sheet_name} | Возраст: {cache_age} сек.")
     
     try:
+        logger.info(f"📥 ЗАГРУЗКА ИЗ GOOGLE SHEETS для {sheet_name}")
+        user_actions_logger.info(f"📥 ЗАГРУЗКА ИЗ GOOGLE | Лист: {sheet_name}")
+        
         sheet = db.worksheet(sheet_name)
         data = sheet.get_all_values()
+        
         cache_data[sheet_name] = (data, now)
+        logger.info(f"💾 СОХРАНЕНО В КЭШ: {sheet_name} (строк: {len(data)})")
+        user_actions_logger.info(f"💾 СОХРАНЕНО В КЭШ | Лист: {sheet_name} | Строк: {len(data)}")
+        
         return data
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки данных для {sheet_name}: {e}")
+        logger.error(f"❌ ОШИБКА загрузки данных для {sheet_name}: {e}")
+        user_actions_logger.error(f"❌ ОШИБКА ЗАГРУЗКИ | Лист: {sheet_name} | Ошибка: {e}")
+        
         if sheet_name in cache_data:
-            logger.warning(f"⚠️ Используем устаревший кэш для {sheet_name}")
+            logger.warning(f"⚠️ ИСПОЛЬЗУЕМ УСТАРЕВШИЙ КЭШ для {sheet_name}")
+            user_actions_logger.warning(f"⚠️ УСТАРЕВШИЙ КЭШ | Лист: {sheet_name}")
             return cache_data[sheet_name][0]
         return []
 
@@ -163,7 +204,9 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         students_sheet = db.worksheet("Студенты")
-        students_data = students_sheet.get_all_records()
+        user_actions_logger.info(f"🔍 ПОИСК СТУДЕНТА | Пользователь: {user_id} | ФИО: '{fio}'")
+        
+        students_data = students_sheet.get_all_records()()
         
         user_found = False
         student_number = None
@@ -193,6 +236,7 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cell = students_sheet.find(str(student_number))
         students_sheet.update_cell(cell.row, 4, str(user_id))
         logger.info(f"✅ Сохранен Telegram ID {user_id} для студента №{student_number} ({fio})")
+        user_actions_logger.info(f"✅ РЕГИСТРАЦИЯ УСПЕШНА | Пользователь: {user_id} | ФИО: {fio} | №: {student_number} | Подгруппа: {subgroup}")
         
         user_data[user_id] = {
             'fio': fio,
@@ -222,6 +266,7 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_fio для пользователя {user_id}: {e}")
+        user_actions_logger.error(f"❌ ОШИБКА РЕГИСТРАЦИИ | Пользователь: {user_id} | ФИО: '{fio}' | Ошибка: {e}")
         await update.message.reply_text("❌ Произошла ошибка при регистрации. Попробуйте позже.")
 
 # АДМИН-ФУНКЦИИ
@@ -238,7 +283,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
-        [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],  # НОВАЯ КНОПКА
+        [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
+         [InlineKeyboardButton("🧹 Очистить кэш", callback_data="admin_clear_cache")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     
@@ -326,6 +372,34 @@ async def admin_server_status(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"❌ Ошибка получения статуса сервера: {e}")
         await update.message.reply_text("❌ Ошибка получения статуса сервера")
+
+async def admin_clear_cache_from_query(query):
+    """Очистка кэша из админ-панели"""
+    user_id = query.from_user.id
+    username = query.from_user.username or "Без username"
+    
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ У вас нет доступа")
+        return
+    
+    global cache_data
+    cache_size_before = len(cache_data)
+    cache_data.clear()
+    
+    logger.info(f"🧹 Кэш очищен администратором {user_id}. Размер до очистки: {cache_size_before}")
+    
+    text = (
+        f"✅ **Кэш успешно очищен!**\n\n"
+        f"🗑️ Удалено записей: {cache_size_before}\n\n"
+        f"💡 *Данные автоматически перезагрузятся при следующем запросе*"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 def get_uptime():
     """Время работы системы"""
@@ -685,7 +759,12 @@ async def mark_attendance(query, day, row_num, action, user_id):
         
         schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
         
-        # ИЗМЕНЕНИЕ: Получаем заголовки для определения столбца студента
+        if row_num == "all":
+            user_actions_logger.info(f"📝 МАССОВАЯ ЗАПИСЬ | Пользователь: {user_id} | День: {day} | Статус: {mark}")
+        else:
+            user_actions_logger.info(f"📝 ЗАПИСЬ | Пользователь: {user_id} | День: {day} | Строка: {row_num} | Статус: {mark}")
+        
+        # Получаем заголовки для определения столбца студента
         header = schedule_sheet.row_values(1)
         
         student_col = None
@@ -712,7 +791,28 @@ async def mark_attendance(query, day, row_num, action, user_id):
             
             if updated_count > 0:
                 logger.info(f"✅ Массовая отметка {mark} для дня {day} пользователем {user_id}: обновлено {updated_count} записей")
-                await show_subjects(query, day, user_id)
+                user_actions_logger.info(f"✅ МАССОВАЯ ЗАПИСЬ УСПЕШНА | Пользователь: {user_id} | День: {day} | Обновлено: {updated_count}")
+                
+                # ОЧИСТКА КЭША после изменений
+                global cache_data
+                cache_key = f"{subgroup} подгруппа"
+                if cache_key in cache_data:
+                    del cache_data[cache_key]
+                    logger.info(f"🧹 Очищен кэш для {cache_key} после массовой отметки")
+                    user_actions_logger.info(f"🧹 КЭШ ОЧИЩЕН | Лист: {cache_key}")
+                
+                # Показываем сообщение об успехе вместо повторного показа предметов
+                await query.edit_message_text(
+                    f"✅ Успешно отмечено на всех предметах!\n"
+                    f"📅 День: {day}\n"
+                    f"✅ Статус: {mark}\n"
+                    f"📊 Обновлено записей: {updated_count}\n\n"
+                    f"Можете продолжить отметку или завершить.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📚 Вернуться к предметам", callback_data=f"day_{day}")],
+                        [InlineKeyboardButton("🏁 Завершить отметку", callback_data="mark_complete")]
+                    ])
+                )
             else:
                 logger.warning(f"⚠️ Не удалось обновить отметки для дня {day} пользователем {user_id}")
                 await query.edit_message_text("❌ Не удалось сохранить отметку")
@@ -723,11 +823,28 @@ async def mark_attendance(query, day, row_num, action, user_id):
             
             logger.info(f"✅ Отметка {mark} для строки {row_num_int}, столбец {student_col} пользователем {user_id}")
             
-            # ИЗМЕНЕНИЕ: После отметки сразу возвращаем к списку предметов дня
-            await show_subjects(query, day, user_id)
+            # ОЧИСТКА КЭША после изменений
+            global cache_data
+            cache_key = f"{subgroup} подгруппа"
+            if cache_key in cache_data:
+                del cache_data[cache_key]
+                logger.info(f"🧹 Очищен кэш для {cache_key} после отметки")
+                user_actions_logger.info(f"🧹 КЭШ ОЧИЩЕН | Лист: {cache_key}")
+            
+            # Показываем сообщение об успехе
+            await query.edit_message_text(
+                f"✅ Отметка сохранена!\n"
+                f"📅 День: {day}\n"
+                f"✅ Статус: {mark}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📚 Вернуться к предметам", callback_data=f"day_{day}")],
+                    [InlineKeyboardButton("🏁 Завершить отметку", callback_data="mark_complete")]
+                ])
+            )
             
     except Exception as e:
         logger.error(f"❌ Ошибка в mark_attendance для пользователя {user_id}: {e}")
+        user_actions_logger.error(f"❌ ОШИБКА ЗАПИСИ | Пользователь: {user_id} | Ошибка: {e}")
         await query.edit_message_text("❌ Ошибка при сохранении отметки")
 
 # Функция для остановки бота
@@ -871,6 +988,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ У вас нет доступа к админ-панели")
         elif data == "admin_students":
             await admin_show_students(query)
+        elif data == "admin_clear_cache":
+            if user_id == ADMIN_ID:
+                await admin_clear_cache_from_query(query)
+            else:
+                await query.edit_message_text("❌ У вас нет доступа")
         elif data.startswith("day_"):
             day = data.split("_")[1]
             logger.info(f"📅 Пользователь {user_id} выбрал день: {day}")
