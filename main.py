@@ -5,6 +5,7 @@ import gspread
 from datetime import datetime, timezone, timedelta
 import os
 import logging
+from datetime import datetime, timedelta
 
 # Импортируем настройки из config.py
 from config import BOT_TOKEN, SPREADSHEET_URL, ADMIN_ID, EMOJI_MAP, get_google_credentials
@@ -40,6 +41,36 @@ def connect_google_sheets():
         logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
         return None
 
+# Кэширование данных
+cache_data = {}
+cache_timeout = timedelta(minutes=5)  # 5 минут кэш
+
+def get_cached_sheet_data(sheet_name):
+    """Получить данные листа с кэшированием"""
+    global cache_data
+    
+    now = datetime.now()
+    if sheet_name in cache_data:
+        data, timestamp = cache_data[sheet_name]
+        if now - timestamp < cache_timeout:
+            logger.info(f"📦 Используем кэш для {sheet_name}")
+            return data
+    
+    # Если кэш устарел или отсутствует
+    logger.info(f"🔄 Обновляем кэш для {sheet_name}")
+    try:
+        sheet = db.worksheet(sheet_name)
+        data = sheet.get_all_values()
+        cache_data[sheet_name] = (data, now)
+        return data
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки данных для {sheet_name}: {e}")
+        # Если ошибка, пробуем вернуть старые кэшированные данные
+        if sheet_name in cache_data:
+            logger.warning(f"⚠️ Используем устаревший кэш для {sheet_name}")
+            return cache_data[sheet_name][0]
+        raise e
+
 # Глобальные переменные
 db = None
 user_data = {}
@@ -52,9 +83,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Проверяем, зарегистрирован ли пользователь
     try:
-        students_sheet = db.worksheet("Студенты")
-        students_data = students_sheet.get_all_records()
-        
+        students_data_records = get_cached_sheet_data("Студенты")
+        header = students_data_records[0]
+        students_data = []
+        for row in students_data_records[1:]:
+            if len(row) >= len(header):
+                student_dict = {header[i]: row[i] for i in range(len(header))}
+                students_data.append(student_dict)
+
         # Ищем пользователя в базе по Telegram ID
         user_found = False
         student_data = None
@@ -205,6 +241,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
+        [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],  # НОВАЯ КНОПКА
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     
@@ -218,11 +255,9 @@ async def admin_show_students(query):
     logger.info(f"👥 Запрос списка студентов администратором {user_id} (@{username})")
     
     try:
-        students_sheet = db.worksheet("Студенты")
-        students_data = students_sheet.get_all_records()
-        
+        students_data_records = get_cached_sheet_data("Студенты")
         text = "👥 Список студентов:\n\n"
-        for student in students_data:
+        for student in students_data_records:
             status = "✅ Зарегистрирован" if student.get('Telegram ID') else "❌ Не зарегистрирован"
             text += f"{student['№']}. {student['ФИО']} - {status}\n"
         
@@ -236,6 +271,120 @@ async def admin_show_students(query):
     except Exception as e:
         logger.error(f"❌ Ошибка при получении списка студентов администратором {user_id}: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
+
+async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистка кэша (только для админа)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    
+    global cache_data
+    cache_data.clear()
+    logger.info("🧹 Кэш очищен администратором")
+    await update.message.reply_text("✅ Кэш очищен")
+
+async def admin_server_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статус сервера (только для админа)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет доступа")
+        return
+    
+    try:
+        import psutil
+        import subprocess
+        
+        # Безопасные метрики (не требуют прав)
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        # Процессы бота
+        bot_processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+            try:
+                if 'python' in proc.info['name'] and 'main.py' in ' '.join(proc.cmdline()):
+                    bot_processes.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        
+        bot_count = len(bot_processes)
+        bot_memory = sum(proc.info['memory_info'].rss for proc in bot_processes) / 1024 / 1024  # MB
+        
+        # Формируем сообщение
+        status_text = (
+            "🖥️ **Статус сервера**\n\n"
+            f"**CPU:** {cpu_percent}%\n"
+            f"**Память:** {memory.percent}% ({memory.used//1024//1024}MБ / {memory.total//1024//1024}MБ)\n"
+            f"**Диск:** {disk.percent}% ({disk.used//1024//1024//1024}GБ / {disk.total//1024//1024//1024}GБ)\n\n"
+            f"**Процессы бота:** {bot_count}\n"
+            f"**Память бота:** {bot_memory:.1f} MБ\n\n"
+            f"**Время работы:** {get_uptime()}\n"
+            f"**Лог файл:** {get_log_file_size()}"
+        )
+        
+        await update.message.reply_text(status_text, parse_mode='Markdown')
+        logger.info(f"📊 Статус сервера запрошен администратором {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса сервера: {e}")
+        await update.message.reply_text("❌ Ошибка получения статуса сервера")
+
+def get_uptime():
+    """Время работы системы"""
+    try:
+        with open('/proc/uptime', 'r') as f:
+            uptime_seconds = float(f.readline().split()[0])
+        
+        days = int(uptime_seconds // 86400)
+        hours = int((uptime_seconds % 86400) // 3600)
+        return f"{days}д {hours}ч"
+    except:
+        return "Неизвестно"
+
+def get_log_file_size():
+    """Размер файла логов"""
+    try:
+        size = os.path.getsize('/root/AtbTAI251_bot/bot.log') / 1024 / 1024
+        return f"{size:.1f} MБ"
+    except:
+        return "Неизвестно"
+
+async def admin_server_status_from_query(query):
+    """Статус сервера из callback"""
+    user_id = query.from_user.id
+    
+    try:
+        import psutil
+        
+        # Аналогично admin_server_status но для query
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        
+        bot_processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'memory_info']):
+            try:
+                if 'python' in proc.info['name'] and 'main.py' in ' '.join(proc.cmdline()):
+                    bot_processes.append(proc)
+            except:
+                pass
+        
+        bot_count = len(bot_processes)
+        
+        status_text = (
+            "🖥️ **Статус сервера**\n\n"
+            f"**CPU:** {cpu_percent}%\n"
+            f"**Память:** {memory.percent}%\n"
+            f"**Процессы бота:** {bot_count}\n"
+            f"**Время работы:** {get_uptime()}"
+        )
+        
+        await query.edit_message_text(status_text, parse_mode='Markdown')
+        logger.info(f"📊 Статус сервера запрошен через панель администратором {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса сервера: {e}")
+        await query.edit_message_text("❌ Ошибка получения статуса сервера")
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 async def handle_mark_complete(query, user_id):
@@ -256,12 +405,13 @@ async def show_days_with_status(query, user_id):
     student_number = student_data['number']
     week_type = get_current_week_type()
     
+    if not week_string:
+        week_string = get_current_week_type()
+    
     logger.info(f"📅 Показ дней недели для пользователя {user_id} (@{username}): {student_data['fio']}")
     
     try:
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        schedule_data = schedule_sheet.get_all_values()
-        
+        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
         day_status = {}
         for row in schedule_data[1:]:
             if len(row) > 2 and row[0] == week_type:
@@ -343,9 +493,7 @@ async def show_subjects(query, day, user_id):
     logger.info(f"📚 Показ предметов для {day} пользователю {user_id} (@{username}): {student_data['fio']}")
     
     try:
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        schedule_data = schedule_sheet.get_all_values()
-        
+        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
         subjects_with_status = []
         header = schedule_data[0]
         
@@ -443,6 +591,74 @@ async def show_subject_actions(query, day, row_num):
     except Exception as e:
         logger.error(f"❌ Ошибка в show_subject_actions для пользователя {user_id}: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке действий")
+
+async def show_week_selection(query, user_id):
+    """Показ выбора недели"""
+    if user_id not in user_data:
+        logger.warning(f"⚠️ Попытка выбора недели незарегистрированным пользователем {user_id}")
+        await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
+        return
+        
+    student_data = user_data[user_id]
+    subgroup = student_data['subgroup']
+    
+    logger.info(f"📅 Выбор недели пользователем {user_id}: {student_data['fio']}")
+    
+    try:
+        # Получаем данные расписания
+        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
+        
+        # Получаем информацию о неделях
+        current_week = get_week_info(0)
+        previous_week = get_week_info(-1)
+        
+        keyboard = []
+        
+        # Текущая неделя - всегда доступна
+        if current_week:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📅 {current_week['string']}", 
+                    callback_data=f"week_{current_week['string']}"
+                )
+            ])
+        
+        # Предыдущая неделя - проверяем наличие в расписании
+        if previous_week:
+            # Проверяем есть ли занятия на предыдущей неделе
+            week_has_classes = any(
+                len(row) > 2 and row[0] == previous_week['string'] 
+                for row in schedule_data[1:]
+            )
+            
+            if week_has_classes:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"↩️ {previous_week['string']}", 
+                        callback_data=f"week_{previous_week['string']}"
+                    )
+                ])
+            else:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        "❌ Недели нет", 
+                        callback_data="week_none"
+                    )
+                ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "Выберите неделю для отметки посещаемости:",
+            reply_markup=reply_markup
+        )
+        logger.info(f"✅ Выбор недели показан пользователю {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в show_week_selection для пользователя {user_id}: {e}")
+        await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
 async def mark_attendance(query, day, row_num, action, user_id):
     if user_id not in user_data:
@@ -555,6 +771,43 @@ def get_current_week_type():
         # Fallback на фиксированное значение в случае ошибки
         return "Знаменатель - 8 неделя"
 
+def get_week_info(week_offset=0):
+    """
+    Получить информацию о неделе со смещением
+    week_offset = 0 - текущая неделя
+    week_offset = -1 - предыдущая неделя
+    """
+    try:
+        moscow_tz = timezone(timedelta(hours=3))
+        now = datetime.now(moscow_tz)
+        
+        semester_start = datetime(2025, 9, 1, tzinfo=moscow_tz)
+        days_diff = (now - semester_start).days
+        
+        # Учитываем смещение
+        week_number = (days_diff // 7) + 1 + week_offset
+        
+        # Проверяем что неделя в пределах семестра (1-17)
+        if week_number < 1 or week_number > 17:
+            return None
+        
+        week_type = "Знаменатель" if week_number % 2 == 0 else "Числитель"
+        
+        return {
+            'number': week_number,
+            'type': week_type,
+            'string': f"{week_type} - {week_number} неделя"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в определении недели: {e}")
+        return None
+
+def get_current_week_type():
+    """Текущая неделя для обратной совместимости"""
+    week_info = get_week_info(0)
+    return week_info['string'] if week_info else "Знаменатель - 8 неделя"
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Без username"
@@ -586,7 +839,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if data == "mark_attendance":
-            await show_days_with_status(query, user_id)
+            await show_week_selection(query, user_id)
+        elif data.startswith("week_"):
+            if data == "week_none":
+                await query.answer("Эта неделя недоступна для отметки", show_alert=True)
+                return
+            week_string = data[5:]  # Извлекаем название недели
+            await show_days_with_status(query, user_id, week_string)
+        if data == "mark_attendance":
+            await show_week_selection(query, user_id)
+        elif data == "admin_status":
+            if user_id == ADMIN_ID:
+                await admin_server_status_from_query(query)
+            else:
+                await query.edit_message_text("❌ У вас нет доступа")
         elif data == "mark_complete":
             await handle_mark_complete(query, user_id)
         elif data == "back_to_main":
@@ -676,6 +942,7 @@ def main():
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CommandHandler("clearcache", clear_cache))
 
     logger.info("🤖 Бот запускается...")
     application.run_polling()
