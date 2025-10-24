@@ -15,40 +15,16 @@ from config import BOT_TOKEN, SPREADSHEET_URL, ADMIN_ID, EMOJI_MAP, get_google_c
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/root/AtbTAI251_bot/bot.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-
-class CustomHTTPHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            log_entry = self.format(record)
-            if "📝" not in log_entry:  # Чтобы не дублировать user actions
-                send_log_to_server(log_entry, "bot")
-        except:
-            pass
-
-http_handler = CustomHTTPHandler()
-http_handler.setLevel(logging.INFO)
-logger.addHandler(http_handler)
 
 # Отключаем логирование для httpx и httpcore
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-# Настройка логирования действий пользователей
-user_actions_logger = logging.getLogger('user_actions')
-user_actions_logger.setLevel(logging.INFO)
-user_actions_handler = logging.FileHandler('/root/AtbTAI251_bot/user_actions.log')
-user_actions_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-user_actions_logger.addHandler(user_actions_handler)
-user_actions_logger.propagate = False
-
 def send_log_to_server(log_message, log_type="bot", level="info"):
-    """Асинхронная отправка логов на сервер"""
+    """Отправка логов на сервер"""
     def send_async():
         try:
             requests.post(
@@ -63,23 +39,50 @@ def send_log_to_server(log_message, log_type="bot", level="info"):
                 timeout=3
             )
         except Exception as e:
-            print(f"Ошибка отправки лога: {e}")  # В консоль, если не отправилось
+            print(f"Ошибка отправки лога: {e}")
     
     Thread(target=send_async).start()
 
 def log_user_action(user_id, username, action, details="", level="info"):
-    """Логирование действий пользователя"""
+    """Логирование действий пользователя ТОЛЬКО НА СЕРВЕР"""
     user_info = f"ID:{user_id} (@{username})"
     log_message = f"👤 {user_info} | {action}"
     if details:
         log_message += f" | {details}"
     
-    user_actions_logger.info(log_message)
-    logger.info(f"📝 {log_message}")
-    
-    # Отправляем на сервер
+    # ТОЛЬКО ОТПРАВКА НА СЕРВЕР, БЕЗ ФАЙЛОВ
     send_log_to_server(log_message, "user_action", level)
+    logger.info(f"📝 {log_message}")  # В консоль для отладки
 
+def send_log_to_server(log_message, log_type="bot", level="info"):
+    """Отправка логов на сервер"""
+    def send_async():
+        try:
+            print(f"🔍 ОТЛАДКА: Пытаюсь отправить лог на http://45.150.8.223/logs.php")
+            print(f"🔍 ОТЛАДКА: Лог: {log_message}")
+            
+            response = requests.post(
+                'http://45.150.8.223/logs.php',
+                data=json.dumps({
+                    'log': log_message,
+                    'type': log_type,
+                    'level': level,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }),
+                headers={'Content-Type': 'application/json'},
+                timeout=5  # Увеличил таймаут
+            )
+            
+            print(f"🔍 ОТЛАДКА: Статус ответа: {response.status_code}")
+            if response.status_code != 200:
+                print(f"🔍 ОТЛАДКА: Текст ответа: {response.text}")
+                
+        except Exception as e:
+            print(f"🔍 ОТЛАДКА: Ошибка при отправке: {e}")
+    
+    Thread(target=send_async).start()
+
+# Подключение к Google Sheets
 # Подключение к Google Sheets
 def connect_google_sheets():
     try:
@@ -97,42 +100,10 @@ def connect_google_sheets():
         send_log_to_server(error_msg, "error", "critical")
         return None
 
-# Кэширование данных
-cache_data = {}
-cache_timeout = timedelta(minutes=5)
-
-def get_cached_sheet_data(sheet_name):
-    """Получить данные листа с кэшированием"""
-    now = datetime.now()
-    
-    if sheet_name in cache_data:
-        data, timestamp = cache_data[sheet_name]
-        if (now - timestamp) < cache_timeout:
-            logger.info(f"📦 Используем кэш для {sheet_name}")
-            return data
-    
-    try:
-        logger.info(f"📥 Загружаем данные для {sheet_name}")
-        sheet = db.worksheet(sheet_name)
-        data = sheet.get_all_values()
-        cache_data[sheet_name] = (data, now)
-        logger.info(f"💾 Сохранено в кэш: {sheet_name} (строк: {len(data)})")
-        return data
-    except Exception as e:
-        error_msg = f"❌ Ошибка загрузки {sheet_name}: {str(e)}"
-        logger.error(error_msg)
-        send_log_to_server(error_msg, "error", "error")
-        if sheet_name in cache_data:
-            logger.warning(f"⚠️ Используем устаревший кэш для {sheet_name}")
-            return cache_data[sheet_name][0]
-        return []
-
 # Глобальные переменные
 db = None
 user_data = {}
 user_states = {}
-week_cache = None
-week_cache_time = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -141,13 +112,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     send_log_to_server(f"🟢 /start от {user_id} (@{username})", "command")
     
     try:
-        students_data_records = get_cached_sheet_data("Студенты")
-        header = students_data_records[0]
-        students_data = []
-        for row in students_data_records[1:]:
-            if len(row) >= len(header):
-                student_dict = {header[i]: row[i] for i in range(len(header))}
-                students_data.append(student_dict)
+        students_sheet = db.worksheet("Студенты")
+        students_data = students_sheet.get_all_records()
 
         user_found = False
         student_data = None
@@ -279,7 +245,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
         [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
-        [InlineKeyboardButton("🧹 Очистить кэш", callback_data="admin_clear_cache")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     
@@ -293,9 +258,11 @@ async def admin_show_students(query):
     log_user_action(user_id, username, "Запрос списка студентов")
     
     try:
-        students_data_records = get_cached_sheet_data("Студенты")
+        students_sheet = db.worksheet("Студенты")
+        students_data = students_sheet.get_all_values()
+        
         text = "👥 Список студентов:\n\n"
-        for student in students_data_records[1:]:  # Пропускаем заголовок
+        for student in students_data[1:]:
             if len(student) >= 4:
                 status = "✅ Зарегистрирован" if student[3] else "❌ Не зарегистрирован"
                 text += f"{student[0]}. {student[1]} - {status}\n"
@@ -308,38 +275,6 @@ async def admin_show_students(query):
     except Exception as e:
         logger.error(f"❌ Ошибка при получении списка студентов: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
-
-async def clear_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Очистка кэша (только для админа)"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        return
-    
-    cache_size = len(cache_data)
-    cache_data.clear()
-    logger.info("🧹 Кэш очищен администратором")
-    await update.message.reply_text(f"✅ Кэш очищен. Удалено записей: {cache_size}")
-
-async def admin_clear_cache_from_query(query):
-    """Очистка кэша из админ-панели"""
-    user_id = query.from_user.id
-    username = query.from_user.username or "Без username"
-    
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ У вас нет доступа")
-        return
-    
-    cache_size_before = len(cache_data)
-    cache_data.clear()
-    
-    log_user_action(user_id, username, "Очистка кэша", f"удалено {cache_size_before} записей")
-    
-    text = f"✅ **Кэш успешно очищен!**\n\n🗑️ Удалено записей: {cache_size_before}"
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def admin_show_status(query):
     """Показать статус сервера"""
@@ -378,7 +313,6 @@ async def admin_show_status(query):
         
         # Статистика бота
         bot_info = f"🤖 **Пользователей**: {len(user_data)}\n"
-        bot_info += f"📊 **Кэш**: {len(cache_data)} записей\n"
         
         status_text = (
             "**🖥️ Статус сервера**\n\n"
@@ -419,7 +353,8 @@ async def show_week_selection(query, user_id):
     
     try:
         # Получаем данные расписания для проверки наличия недель
-        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
+        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+        schedule_data = schedule_sheet.get_all_values()
         
         # Получаем информацию о неделях
         current_week_info = get_week_info(0)  # Текущая неделя
@@ -497,7 +432,8 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
         week_type = get_current_week_type()
     
     try:
-        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
+        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+        schedule_data = schedule_sheet.get_all_values()
         day_status = {}
         
         for row in schedule_data[1:]:
@@ -572,7 +508,8 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
     log_user_action(user_id, username, f"Просмотр предметов", f"день: {day}")
     
     try:
-        schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
+        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+        schedule_data = schedule_sheet.get_all_values()
         subjects_with_status = []
         header = schedule_data[0]
         
@@ -588,27 +525,30 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             if len(row) > 2 and row[0] == week_type and row[1] == day:
                 day_rows.append((row_num, row))
         
-        # Инициализируем временные данные для отметок, если их еще нет
-        if 'temp_marks' not in context.user_data:
-            context.user_data['temp_marks'] = {}
-        
-        day_key = f"{day}_{week_type}"
-        if day_key not in context.user_data['temp_marks']:
-            context.user_data['temp_marks'][day_key] = {}
-        
-        temp_marks = context.user_data['temp_marks'][day_key]
+        # Проверяем временные отметки
+        temp_marks = {}
+        day_key = f"{week_type}_{day}"
+        if context and 'temp_marks' in context.user_data and day_key in context.user_data['temp_marks']:
+            temp_marks = context.user_data['temp_marks'][day_key]
         
         for row_num, row in day_rows:
             subject = row[2]
-            subject_type = "Лекция" if "лекцион" in subject.lower() else "Практика" if "практическ" in subject.lower() else "Лабораторная" if "лабораторн" in subject.lower() else "Занятие"
             
-            # Проверяем текущую отметку в таблице
-            current_mark = ""
-            if student_col and len(row) > student_col:
-                current_mark = row[student_col].strip()
+            # Определяем тип занятия
+            subject_lower = subject.lower()
+            if "лекцион" in subject_lower:
+                subject_type = "Лекция"
+            elif "практическ" in subject_lower:
+                subject_type = "Практика" 
+            elif "лабораторн" in subject_lower:
+                subject_type = "Лабораторная"
+            else:
+                subject_type = "Занятие"
             
-            # Используем временную отметку или текущую из таблицы
-            mark = temp_marks.get(str(row_num), current_mark)
+            # Проверяем отметку - сначала временную, потом из таблицы
+            mark = temp_marks.get(str(row_num), "")
+            if not mark and student_col and len(row) > student_col:
+                mark = row[student_col].strip()
             
             status = ""
             if mark == '✅':
@@ -619,14 +559,14 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
                 status = ' ⚠️'
             
             button_text = f"{subject_type}{status}"
-            subjects_with_status.append((subject, button_text, row_num, mark))
+            subjects_with_status.append((subject, button_text, row_num, status))
         
         if not subjects_with_status:
             await query.edit_message_text(f"❌ На {day} ({week_type}) нет занятий")
             return
             
         keyboard = []
-        for full_subject, button_text, row_num, current_mark in subjects_with_status:
+        for full_subject, button_text, row_num, status in subjects_with_status:
             keyboard.append([InlineKeyboardButton(button_text, callback_data=f"subject_{day}_{row_num}")])
         
         keyboard.append([InlineKeyboardButton("———", callback_data="separator")])
@@ -638,25 +578,22 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"temp_all_{day}_excused")
         ])
         
-        # ТОЛЬКО кнопка завершить - она сохраняет все в таблицу
+        # Показываем количество временных изменений
+        temp_count = len(temp_marks)
+        save_button = "💾 Завершить"
+        
         keyboard.append([
             InlineKeyboardButton("🔙 Назад", callback_data="mark_attendance"),
-            InlineKeyboardButton("💾 Завершить", callback_data=f"finish_{day}")
+            InlineKeyboardButton(save_button, callback_data=f"save_{day}")
         ])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Показываем предварительные изменения
-        preview_text = ""
-        temp_count = len([m for m in temp_marks.values() if m])
-        if temp_count > 0:
-            preview_text = f"\n📝 *Предварительные изменения: {temp_count}*"
-        
-        full_subjects_text = "\n".join([f"• {subject}{status}" for subject, _, _, status in subjects_with_status])
+        # Формируем список предметов с эмодзи
+        full_subjects_text = "\n".join([f"{status} {subject}" if status.strip() else f"  {subject}" for subject, _, _, status in subjects_with_status])
         
         await query.edit_message_text(
-            f"📚 {day} - {week_type}:{preview_text}\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
-            parse_mode='Markdown',
+            f"📚 {day} - {week_type}:\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
             reply_markup=reply_markup
         )
         
@@ -664,8 +601,67 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
         logger.error(f"❌ Ошибка в show_subjects: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
-async def finish_day_marks(query, day, user_id, context):
-    """Сохранить все временные отметки для дня при нажатии 'Завершить'"""
+async def show_subject_actions(query, day, row_num):
+    """Показать выбор действия для предмета"""
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Присутствовал", callback_data=f"action_{day}_{row_num}_present"),
+            InlineKeyboardButton("❌ Отсутствовал", callback_data=f"action_{day}_{row_num}_absent")
+        ],
+        [
+            InlineKeyboardButton("⚠️ Отсутствовал(У)", callback_data=f"action_{day}_{row_num}_excused"),
+            InlineKeyboardButton("🔙 Назад", callback_data=f"day_{day}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Выберите действие для отметки:", reply_markup=reply_markup)
+
+async def temp_mark_attendance(query, day, row_num, action, user_id, context):
+    """Временное сохранение отметки (без записи в таблицу)"""
+    if user_id not in user_data:
+        await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
+        return
+        
+    student_data = user_data[user_id]
+    username = query.from_user.username or "Без username"
+    
+    emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️'}
+    mark = emoji_map.get(action, '❓')
+    
+    log_user_action(user_id, username, f"Временная отметка", f"день: {day}, статус: {mark}")
+    
+    # Сохраняем во временное хранилище
+    if 'temp_marks' not in context.user_data:
+        context.user_data['temp_marks'] = {}
+    
+    week_string = context.user_data.get('week_string', get_current_week_type())
+    day_key = f"{week_string}_{day}"
+    
+    if day_key not in context.user_data['temp_marks']:
+        context.user_data['temp_marks'][day_key] = {}
+    
+    if row_num == "all":
+        # Для массовой отметки нужно получить все row_num этого дня
+        student_data = user_data[user_id]
+        subgroup = student_data['subgroup']
+        try:
+            schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+            schedule_data = schedule_sheet.get_all_values()
+            
+            for i, row in enumerate(schedule_data[1:], start=2):
+                if len(row) > 2 and row[0] == week_string and row[1] == day:
+                    context.user_data['temp_marks'][day_key][str(i)] = mark
+        except Exception as e:
+            logger.error(f"Ошибка при получении данных для массовой отметки: {e}")
+    else:
+        # Одиночная отметка
+        context.user_data['temp_marks'][day_key][row_num] = mark
+    
+    # Возвращаем к списку предметов с обновленными статусами
+    await show_subjects(query, day, user_id, week_string, context)
+
+async def save_attendance(query, day, user_id, context):
+    """Сохранение всех временных отметок в таблицу"""
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -675,18 +671,22 @@ async def finish_day_marks(query, day, user_id, context):
     username = query.from_user.username or "Без username"
     subgroup = student_data['subgroup']
     
+    week_string = context.user_data.get('week_string', get_current_week_type())
+    day_key = f"{week_string}_{day}"
+    
+    # Проверяем есть ли временные отметки
+    if 'temp_marks' not in context.user_data or day_key not in context.user_data['temp_marks']:
+        await query.answer("Нет изменений для сохранения", show_alert=True)
+        await show_days_with_status(query, user_id, week_string, context)
+        return
+    
+    temp_marks = context.user_data['temp_marks'][day_key]
+    if not temp_marks:
+        await query.answer("Нет изменений для сохранения", show_alert=True)
+        await show_days_with_status(query, user_id, week_string, context)
+        return
+    
     try:
-        week_string = context.user_data.get('week_string')
-        week_type = week_string if week_string else get_current_week_type()
-        day_key = f"{day}_{week_type}"
-        
-        if 'temp_marks' not in context.user_data or day_key not in context.user_data['temp_marks']:
-            # Нет изменений - просто возвращаем назад
-            await show_days_with_status(query, user_id, week_string, context)
-            return
-        
-        temp_marks = context.user_data['temp_marks'][day_key]
-        
         schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
         header = schedule_sheet.row_values(1)
         
@@ -702,21 +702,16 @@ async def finish_day_marks(query, day, user_id, context):
         
         updated_count = 0
         for row_num_str, mark in temp_marks.items():
-            if mark:  # Сохраняем только если есть отметка
-                row_num = int(row_num_str)
-                schedule_sheet.update_cell(row_num, student_col, mark)
-                updated_count += 1
+            row_num = int(row_num_str)
+            schedule_sheet.update_cell(row_num, student_col, mark)
+            updated_count += 1
         
-        # Очищаем временные отметки и кэш
-        if day_key in context.user_data['temp_marks']:
-            del context.user_data['temp_marks'][day_key]
-        cache_key = f"{subgroup} подгруппа"
-        if cache_key in cache_data:
-            del cache_data[cache_key]
+        # Очищаем временные отметки
+        del context.user_data['temp_marks'][day_key]
         
-        log_user_action(user_id, username, "Завершение отметок", f"день: {day}, сохранено: {updated_count}")
+        log_user_action(user_id, username, "Сохранение отметок", f"день: {day}, сохранено: {updated_count}")
         
-        # Возвращаем к выбору дней с обновленными статусами
+        # Возвращаем к списку дней
         await show_days_with_status(query, user_id, week_string, context)
         
     except Exception as e:
@@ -725,94 +720,9 @@ async def finish_day_marks(query, day, user_id, context):
         log_user_action(user_id, username, "ОШИБКА СОХРАНЕНИЯ", f"{day} - {str(e)}", "error")
         await query.edit_message_text("❌ Ошибка при сохранении отметок")
 
-async def mark_attendance(query, day, row_num, action, user_id, context=None):
-    if user_id not in user_data:
-        await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
-        return
-        
-    student_data = user_data[user_id]
-    student_number = student_data['number']
-    username = query.from_user.username or "Без username"
-    subgroup = student_data['subgroup']
-    
-    emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️'}
-    mark = emoji_map.get(action, '❓')
-    
-    log_user_action(user_id, username, f"Отметка посещаемости", f"день: {day}, статус: {mark}")
-    send_log_to_server(f"✅ Отметка: {user_id} -> {day} {mark}", "attendance")
-    try:
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        header = schedule_sheet.row_values(1)
-        
-        student_col = None
-        for idx, cell in enumerate(header):
-            if str(cell).strip() == str(student_number):
-                student_col = idx + 1
-                break
-        
-        if student_col is None:
-            await query.edit_message_text("❌ Ошибка: студент не найден в таблице посещаемости")
-            return
-        
-        if row_num == "all":
-            # Массовая отметка
-            schedule_data = schedule_sheet.get_all_values()
-            updated_count = 0
-            
-            current_week = get_current_week_type()
-            
-            for i, row in enumerate(schedule_data[1:], start=2):
-                if len(row) > 2 and row[0] == current_week and row[1] == day:
-                    if student_col <= len(row):
-                        schedule_sheet.update_cell(i, student_col, mark)
-                        updated_count += 1
-            
-            if updated_count > 0:
-                # Очищаем кэш
-                cache_key = f"{subgroup} подгруппа"
-                if cache_key in cache_data:
-                    del cache_data[cache_key]
-                
-                log_user_action(user_id, username, "Массовая отметка завершена", f"обновлено {updated_count} записей")
-                
-                # Автоматически возвращаем к списку предметов
-                week_string = context.user_data.get('week_string') if context else None
-                await show_subjects(query, day, user_id, week_string, context)
-                
-            else:
-                await query.edit_message_text("❌ Не удалось сохранить отметку")
-        else:
-            # Отметка на конкретном предмете
-            row_num_int = int(row_num)
-            schedule_sheet.update_cell(row_num_int, student_col, mark)
-            
-            # Очищаем кэш
-            cache_key = f"{subgroup} подгруппа"
-            if cache_key in cache_data:
-                del cache_data[cache_key]
-            
-            log_user_action(user_id, username, "Отметка сохранена", f"строка: {row_num}, статус: {mark}")
-            
-            # Автоматически возвращаем к списку предметов
-            week_string = context.user_data.get('week_string') if context else None
-            await show_subjects(query, day, user_id, week_string, context)
-            
-    except Exception as e:
-        error_msg = f"❌ Ошибка отметки {user_id}: {str(e)}"
-        logger.error(error_msg)
-        log_user_action(user_id, username, "ОШИБКА ОТМЕТКИ", f"{day} {action} - {str(e)}", "error")
-        await query.edit_message_text("❌ Ошибка при сохранении отметки")
-
 # УТИЛИТЫ
 def get_current_week_type():
-    """Текущая неделя с кэшированием"""
-    global week_cache, week_cache_time
-    
-    # Кэшируем на 1 минуту чтобы избежать зацикливания
-    now = datetime.now()
-    if week_cache and week_cache_time and (now - week_cache_time).seconds < 60:
-        return week_cache
-    
+    """Текущая неделя"""
     try:
         # Московский часовой пояс (UTC+3)
         moscow_tz = timezone(timedelta(hours=3))
@@ -827,10 +737,6 @@ def get_current_week_type():
         week_type = "Знаменатель" if week_number % 2 == 0 else "Числитель"
         
         result = f"{week_type} - {week_number} неделя"
-        
-        # Кэшируем результат
-        week_cache = result
-        week_cache_time = now
         
         logger.info(f"📅 Текущая неделя: {result} (дата: {now_tz.strftime('%d.%m.%Y %H:%M')})")
         
@@ -874,7 +780,6 @@ def get_week_info(week_offset=0):
         return None
 
 # ГЛАВНЫЙ ОБРАБОТЧИК КНОПОК
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -900,7 +805,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard = [
                     [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
                     [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
-                    [InlineKeyboardButton("🧹 Очистить кэш", callback_data="admin_clear_cache")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -911,8 +815,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_show_students(query)
         elif data == "admin_status":
             await admin_show_status(query)
-        elif data == "admin_clear_cache":
-            await admin_clear_cache_from_query(query)
         elif data == "back_to_main":
             keyboard = [[InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")]]
             if user_id == ADMIN_ID:
@@ -927,66 +829,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts = data.split("_")
             day = parts[1]
             row_num = parts[2]
-            await show_subject_actions(query, day, row_num, context)
-        elif data.startswith("temp_mark_"):
+            await show_subject_actions(query, day, row_num)
+        elif data.startswith("action_"):
             parts = data.split("_")
-            day = parts[2]
-            row_num = parts[3]
-            action = parts[4]
-            
-            # Сохраняем временную отметку
-            if 'temp_marks' not in context.user_data:
-                context.user_data['temp_marks'] = {}
-            
-            week_string = context.user_data.get('week_string')
-            week_type = week_string if week_string else get_current_week_type()
-            day_key = f"{day}_{week_type}"
-            
-            if day_key not in context.user_data['temp_marks']:
-                context.user_data['temp_marks'][day_key] = {}
-            
-            emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️', 'clear': ''}
-            mark = emoji_map.get(action, '')
-            
-            context.user_data['temp_marks'][day_key][row_num] = mark
-            
-            # Возвращаем к выбору действий
-            await show_subject_actions(query, day, row_num, context)
+            day = parts[1]
+            row_num = parts[2]
+            action = parts[3]
+            await temp_mark_attendance(query, day, row_num, action, user_id, context)
         elif data.startswith("temp_all_"):
             parts = data.split("_")
             day = parts[2]
             action = parts[3]
-            
-            # Временная массовая отметка
-            if 'temp_marks' not in context.user_data:
-                context.user_data['temp_marks'] = {}
-            
-            week_string = context.user_data.get('week_string')
-            week_type = week_string if week_string else get_current_week_type()
-            day_key = f"{day}_{week_type}"
-            
-            if day_key not in context.user_data['temp_marks']:
-                context.user_data['temp_marks'][day_key] = {}
-            
-            emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️'}
-            mark = emoji_map.get(action, '')
-            
-            # Получаем все предметы дня
-            student_data = user_data[user_id]
-            subgroup = student_data['subgroup']
-            schedule_data = get_cached_sheet_data(f"{subgroup} подгруппа")
-            
-            for row_num, row in enumerate(schedule_data[1:], start=2):
-                if len(row) > 2 and row[0] == week_type and row[1] == day:
-                    context.user_data['temp_marks'][day_key][str(row_num)] = mark
-            
-            await show_subjects(query, day, user_id, week_string, context)
-        elif data.startswith("finish_"):
-            day = data.split("_")[1]
-            await finish_day_marks(query, day, user_id, context)
+            await temp_mark_attendance(query, day, "all", action, user_id, context)
         elif data == "mark_complete":
             week_string = context.user_data.get('week_string')
             await show_days_with_status(query, user_id, week_string, context)
+        elif data.startswith("save_"):
+            day = data.split("_")[1]
+            await save_attendance(query, day, user_id, context)
         else:
             await query.edit_message_text("❌ Неизвестная команда")
     except Exception as e:
@@ -995,52 +855,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         send_log_to_server(error_msg, "error", "error")
         await query.edit_message_text("❌ Произошла ошибка при обработке запроса")
 
-async def show_subject_actions(query, day, row_num):
-    user_id = query.from_user.id
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Присутствовал", callback_data=f"action_{day}_{row_num}_present"),
-            InlineKeyboardButton("❌ Отсутствовал", callback_data=f"action_{day}_{row_num}_absent")
-        ],
-        [
-            InlineKeyboardButton("⚠️ Отсутствовал(У)", callback_data=f"action_{day}_{row_num}_excused"),
-            InlineKeyboardButton("🔙 Назад", callback_data=f"day_{day}")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("Выберите действие для отметки:", reply_markup=reply_markup)
-
-def main():
-    global db
-    send_log_to_server("🚀 ЗАПУСК БОТА: Инициализация...", "system", "info")
-    logger.info("🚀 ЗАПУСК БОТА...")
-    
-    try:
-        db = connect_google_sheets()
-        if db is None:
-            send_log_to_server("💥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets", "system", "critical")
-            return
-        
-        send_log_to_server("✅ Бот успешно подключился к Google Sheets", "system", "info")
-        application = Application.builder().token(BOT_TOKEN).build()
-
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("admin", admin_panel))
-        application.add_handler(CommandHandler("status", status_command))
-        application.add_handler(CommandHandler("stop", stop_command))
-        application.add_handler(CommandHandler("clearcache", clear_cache))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
-        application.add_handler(CallbackQueryHandler(button_handler))
-
-        logger.info("🤖 Бот запускается...")
-        application.run_polling()
-        
-    except Exception as e:
-        error_msg = f"💥 КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ: {str(e)}"
-        logger.critical(error_msg)
-        send_log_to_server(error_msg, "system", "critical")
-
-# Добавьте недостающие простые функции
+#Недостающие простые функции
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_data:
@@ -1057,6 +872,35 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os._exit(0)
     else:
         await update.message.reply_text("❌ У вас нет прав для этой команды")
+
+def main():
+    global db
+    logger.info(f"🚀 ЗАПУСК БОТА: Окружение - {'СЕРВЕР' if os.path.exists('/root/AtbTAI251_bot') else 'ЛОКАЛЬНОЕ'}")
+    send_log_to_server("🚀 ЗАПУСК БОТА: Инициализация...", "system", "info")
+    
+    try:
+        db = connect_google_sheets()
+        if db is None:
+            send_log_to_server("💥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets", "system", "critical")
+            return
+        
+        send_log_to_server("✅ Бот успешно подключился к Google Sheets", "system", "info")
+        application = Application.builder().token(BOT_TOKEN).build()
+
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("admin", admin_panel))
+        application.add_handler(CommandHandler("status", status_command))
+        application.add_handler(CommandHandler("stop", stop_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
+        application.add_handler(CallbackQueryHandler(button_handler))
+
+        logger.info("🤖 Бот запускается...")
+        application.run_polling()
+        
+    except Exception as e:
+        error_msg = f"💥 КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ: {str(e)}"
+        logger.critical(error_msg)
+        send_log_to_server(error_msg, "system", "critical")
 
 if __name__ == "__main__":
     main()
