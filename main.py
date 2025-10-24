@@ -24,7 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def send_log_to_server(log_message, log_type="bot", level="info"):
-    """Отправка логов на НАШ сервер"""
+    """Отправка логов на внешний сервер"""
     def send_async():
         try:
             log_data = {
@@ -35,7 +35,7 @@ def send_log_to_server(log_message, log_type="bot", level="info"):
             }
             
             response = requests.post(
-                'http://redleg30607.fvds.ru/bot_logger.php', #Ваш домен
+                'http://45.150.8.223/logs.php', 
                 json=log_data,
                 headers={'Content-Type': 'application/json'},
                 timeout=10
