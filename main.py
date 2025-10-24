@@ -24,22 +24,35 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def send_log_to_server(log_message, log_type="bot", level="info"):
-    """Отправка логов на сервер"""
+    """Исправленная отправка логов на сервер"""
     def send_async():
         try:
-            requests.post(
+            print(f"🔧 ОТПРАВКА ЛОГА: {log_message}")
+            
+            log_data = {
+                'log': log_message,
+                'type': log_type,
+                'level': level,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            response = requests.post(
                 'http://45.150.8.223/logs.php',
-                data=json.dumps({
-                    'log': log_message,
-                    'type': log_type,
-                    'level': level,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }),
-                headers={'Content-Type': 'application/json'},
-                timeout=3
+                json=log_data,  # ИСПРАВЛЕНО: используем json вместо data
+                timeout=5
             )
+            
+            if response.status_code == 200:
+                print(f"✅ Лог успешно отправлен (статус {response.status_code})")
+            else:
+                print(f"❌ Ошибка отправки лога (статус {response.status_code}): {response.text}")
+                
+        except requests.exceptions.Timeout:
+            print("⏰ Таймаут при отправке лога")
+        except requests.exceptions.ConnectionError:
+            print("🔌 Ошибка подключения к серверу логов")
         except Exception as e:
-            print(f"Ошибка отправки лога: {e}")
+            print(f"💥 Неожиданная ошибка: {e}")
     
     Thread(target=send_async).start()
 
@@ -50,39 +63,9 @@ def log_user_action(user_id, username, action, details="", level="info"):
     if details:
         log_message += f" | {details}"
     
-    # ТОЛЬКО ОТПРАВКА НА СЕРВЕР, БЕЗ ФАЙЛОВ
     send_log_to_server(log_message, "user_action", level)
     logger.info(f"📝 {log_message}")  # В консоль для отладки
 
-def send_log_to_server(log_message, log_type="bot", level="info"):
-    """Отправка логов на сервер"""
-    def send_async():
-        try:
-            print(f"🔍 ОТЛАДКА: Пытаюсь отправить лог на http://45.150.8.223/logs.php")
-            print(f"🔍 ОТЛАДКА: Лог: {log_message}")
-            
-            response = requests.post(
-                'http://45.150.8.223/logs.php',
-                data=json.dumps({
-                    'log': log_message,
-                    'type': log_type,
-                    'level': level,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }),
-                headers={'Content-Type': 'application/json'},
-                timeout=5  # Увеличил таймаут
-            )
-            
-            print(f"🔍 ОТЛАДКА: Статус ответа: {response.status_code}")
-            if response.status_code != 200:
-                print(f"🔍 ОТЛАДКА: Текст ответа: {response.text}")
-                
-        except Exception as e:
-            print(f"🔍 ОТЛАДКА: Ошибка при отправке: {e}")
-    
-    Thread(target=send_async).start()
-
-# Подключение к Google Sheets
 # Подключение к Google Sheets
 def connect_google_sheets():
     try:
@@ -873,6 +856,27 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ У вас нет прав для этой команды")
 
+async def test_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая команда для проверки отправки логов"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для этой команды")
+        return
+    
+    test_messages = [
+        "🧪 ТЕСТ: Тестовое сообщение 1",
+        "🧪 ТЕСТ: Тестовое сообщение 2", 
+        "🧪 ТЕСТ: Тестовое сообщение 3"
+    ]
+    
+    for msg in test_messages:
+        send_log_to_server(msg, "test", "info")
+        log_user_action(user_id, username, "ТЕСТ ЛОГА", msg)
+    
+    await update.message.reply_text("✅ Тестовые логи отправлены. Проверьте сервер логов.")
+
 def main():
     global db
     logger.info(f"🚀 ЗАПУСК БОТА: Окружение - {'СЕРВЕР' if os.path.exists('/root/AtbTAI251_bot') else 'ЛОКАЛЬНОЕ'}")
@@ -891,6 +895,7 @@ def main():
         application.add_handler(CommandHandler("admin", admin_panel))
         application.add_handler(CommandHandler("status", status_command))
         application.add_handler(CommandHandler("stop", stop_command))
+        application.add_handler(CommandHandler("testlogs", test_logs))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
         application.add_handler(CallbackQueryHandler(button_handler))
 

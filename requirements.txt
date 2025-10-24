@@ -2,3 +2,4 @@ python-telegram-bot==21.10
 gspread==6.2.0
 python-dotenv==1.0.0
 pytz==2024.2
+requests==2.31.0
