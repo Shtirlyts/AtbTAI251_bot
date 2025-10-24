@@ -35,7 +35,7 @@ def send_log_to_server(log_message, log_type="bot", level="info"):
             }
             
             response = requests.post(
-                'http://45.150.8.223/logs.php', 
+                'http://redleg30607.fvds.ru/logger.php', 
                 json=log_data,
                 headers={'Content-Type': 'application/json'},
                 timeout=10
