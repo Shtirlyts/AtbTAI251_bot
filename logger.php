@@ -1,6 +1,9 @@
 <?php
 header('Content-Type: text/html; charset=UTF-8');
 
+// Московское время (UTC+3)
+date_default_timezone_set('Europe/Moscow');
+
 // Обработка POST запросов (новые логи)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $input = file_get_contents('php://input');

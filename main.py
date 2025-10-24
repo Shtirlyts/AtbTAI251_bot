@@ -31,7 +31,7 @@ def send_log_to_server(log_message, log_type="bot", level="info"):
                 'log': str(log_message),
                 'type': str(log_type),
                 'level': str(level),
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'timestamp': datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
             }
             
             response = requests.post(
