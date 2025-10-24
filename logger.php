@@ -1,4 +1,5 @@
 <?php
+// logger.php - красивый логгер с московским временем и правильным порядком
 header('Content-Type: text/html; charset=UTF-8');
 
 // Московское время (UTC+3)
@@ -20,11 +21,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Отображение логов (GET запросы)
+// Отображение логов (GET запросы) - старые сверху, новые снизу
 $logs = [];
 if (file_exists('bot_logs.txt')) {
-    $logs = array_reverse(file('bot_logs.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
-    $logs = array_slice($logs, 0, 50); // Последние 50 строк
+    $logs = file('bot_logs.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    $logs = array_slice($logs, -50); // Последние 50 строк
 }
 ?>
 <!DOCTYPE html>
@@ -43,7 +44,7 @@ if (file_exists('bot_logs.txt')) {
 </head>
 <body>
     <h1>🤖 Bot Logs - ATB TAI 251</h1>
-    <p>Автообновление каждые 10 секунд</p>
+    <p>Автообновление каждые 10 секунд | Московское время</p>
     <pre>
 <?php foreach ($logs as $log): ?>
 <span class="timestamp"><?= htmlspecialchars(explode(' - ', $log)[0] ?? '') ?></span> - __main__ <span class="info">- INFO -</span> <?= htmlspecialchars(substr($log, strpos($log, '- INFO -') + 9) ?? $log) ?>

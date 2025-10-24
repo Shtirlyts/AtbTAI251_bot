@@ -24,18 +24,21 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def send_log_to_server(log_message, log_type="bot", level="info"):
-    """Отправка логов на внешний сервер"""
+    """Отправка логов на наш сервер с московским временем"""
     def send_async():
         try:
+            # Московское время (UTC+3)
+            moscow_tz = timezone(timedelta(hours=3))
+            
             log_data = {
                 'log': str(log_message),
                 'type': str(log_type),
                 'level': str(level),
-                'timestamp': datetime.now(timezone(timedelta(hours=3))).strftime('%Y-%m-%d %H:%M:%S')
+                'timestamp': datetime.now(moscow_tz).strftime('%Y-%m-%d %H:%M:%S')
             }
             
             response = requests.post(
-                'http://redleg30607.fvds.ru/logger.php', 
+                'http://redleg30607.fvds.ru/logger.php',
                 json=log_data,
                 headers={'Content-Type': 'application/json'},
                 timeout=10
