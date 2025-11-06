@@ -25,7 +25,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $logs = [];
 if (file_exists('bot_logs.txt')) {
     $logs = file('bot_logs.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    $logs = array_slice($logs, -50); // Последние 50 строк
+    $logs = array_slice($logs, -100); // Последние 100 строк
 }
 ?>
 <!DOCTYPE html>
@@ -51,6 +51,6 @@ if (file_exists('bot_logs.txt')) {
 
 <?php endforeach; ?>
     </pre>
-    <p><small>Последние 50 строк логов | IP: <?= $_SERVER['SERVER_ADDR'] ?? 'localhost' ?></small></p>
+    <p><small>Последние 100 строк логов | IP: <?= $_SERVER['SERVER_ADDR'] ?? 'localhost' ?></small></p>
 </body>
 </html>

@@ -436,7 +436,7 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
                         student_col = idx
                         break
                 
-                if student_col and len(row) > student_col and row[student_col].strip() in ['✅', '❌', '⚠️']:
+                if student_col and len(row) > student_col and row[student_col].strip() in EMOJI_MAP.values():
                     day_status[day]['marked'] += 1
         
         days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница"]
@@ -460,14 +460,19 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="mark_attendance")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            f"📅 Выберите день недели ({week_type}):\n\n"
-            "✅ - все пары отмечены\n"
-            "🟡 - часть пар отмечена\n"
-            "❌ - пары не отмечены",
-            reply_markup=reply_markup
-        )
-        
+        try:
+            await query.edit_message_text(
+                f"📅 Выберите день недели ({week_type}):\n\n"
+                "✅ - все пары отмечены\n"
+                "🟡 - часть пар отмечена\n"
+                "❌ - пары не отмечены",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось (неделя: {week_type}), пропускаем")
+            else:
+                raise e
     except Exception as e:
         logger.error(f"❌ Ошибка в show_days_with_status: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
@@ -534,13 +539,10 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             if not mark and student_col and len(row) > student_col:
                 mark = row[student_col].strip()
             
+            # Инициализируем status пустой строкой
             status = ""
-            if mark == '✅':
-                status = ' ✅'
-            elif mark == '❌':
-                status = ' ❌'
-            elif mark == '⚠️':
-                status = ' ⚠️'
+            if mark in EMOJI_MAP.values():
+                status = f' {mark}'
             
             button_text = f"{subject_type}{status}"
             subjects_with_status.append((subject, button_text, row_num, status))
@@ -559,7 +561,8 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             InlineKeyboardButton("❌ Отсут. на всех", callback_data=f"temp_all_{day}_absent")
         ])
         keyboard.append([
-            InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"temp_all_{day}_excused")
+            InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"temp_all_{day}_excused"),
+            InlineKeyboardButton("⚙️ Не было пар", callback_data=f"temp_all_{day}_noclass")
         ])
         
         # Показываем количество временных изменений
@@ -576,10 +579,17 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
         # Формируем список предметов с эмодзи
         full_subjects_text = "\n".join([f"{status} {subject}" if status.strip() else f"  {subject}" for subject, _, _, status in subjects_with_status])
         
-        await query.edit_message_text(
-            f"📚 {day} - {week_type}:\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
-            reply_markup=reply_markup
-        )
+        try:
+            await query.edit_message_text(
+                f"📚 {day} - {week_type}:\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                # Игнорируем эту ошибку - сообщение уже имеет нужное содержимое
+                logger.info(f"Сообщение не изменилось (день: {day}), пропускаем")
+            else:
+                raise e
         
     except Exception as e:
         logger.error(f"❌ Ошибка в show_subjects: {e}")
@@ -594,6 +604,9 @@ async def show_subject_actions(query, day, row_num):
         ],
         [
             InlineKeyboardButton("⚠️ Отсутствовал(У)", callback_data=f"action_{day}_{row_num}_excused"),
+            InlineKeyboardButton("⚙️ Не было пары", callback_data=f"action_{day}_{row_num}_no_class")
+        ],
+        [
             InlineKeyboardButton("🔙 Назад", callback_data=f"day_{day}")
         ]
     ]
@@ -609,8 +622,7 @@ async def temp_mark_attendance(query, day, row_num, action, user_id, context):
     student_data = user_data[user_id]
     username = query.from_user.username or "Без username"
     
-    emoji_map = {'present': '✅', 'absent': '❌', 'excused': '⚠️'}
-    mark = emoji_map.get(action, '❓')
+    mark = EMOJI_MAP.get(action, '❓')
     
     log_user_action(user_id, username, f"Временная отметка", f"день: {day}, статус: {mark}")
     
@@ -626,20 +638,28 @@ async def temp_mark_attendance(query, day, row_num, action, user_id, context):
     
     if row_num == "all":
         # Для массовой отметки нужно получить все row_num этого дня
-        student_data = user_data[user_id]
         subgroup = student_data['subgroup']
         try:
             schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
             schedule_data = schedule_sheet.get_all_values()
             
+            # Ищем строки для этого дня и недели
+            found_rows = 0
             for i, row in enumerate(schedule_data[1:], start=2):
                 if len(row) > 2 and row[0] == week_string and row[1] == day:
                     context.user_data['temp_marks'][day_key][str(i)] = mark
+                    found_rows += 1
+                    
+            logger.info(f"✅ Массовая отметка: {found_rows} пар отмечено как '{mark}'")
+            
         except Exception as e:
-            logger.error(f"Ошибка при получении данных для массовой отметки: {e}")
+            logger.error(f"❌ Ошибка при получении данных для массовой отметки: {e}")
+            await query.answer("❌ Ошибка при массовой отметке", show_alert=True)
+            return
     else:
         # Одиночная отметка
         context.user_data['temp_marks'][day_key][row_num] = mark
+        logger.info(f"✅ Одиночная отметка: строка {row_num} отмечена как '{mark}'")
     
     # Возвращаем к списку предметов с обновленными статусами
     await show_subjects(query, day, user_id, week_string, context)
@@ -771,8 +791,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     username = query.from_user.username or "Без username"
     data = query.data
-    
-    log_user_action(user_id, username, "Callback", data)
     
     try:
         if data == "mark_attendance":

@@ -14,7 +14,8 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "1885783905"))
 EMOJI_MAP = {
     'present': '✅',
     'absent': '❌',
-    'excused': '⚠️'
+    'excused': '⚠️',
+    'noclass': '⚙️'
 }
 
 def get_google_credentials():
