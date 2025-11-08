@@ -1221,7 +1221,7 @@ async def temp_mark_attendance(query, day, row_num, action, user_id, context):
     await show_subjects(query, day, user_id, week_string, context)
 
 async def save_attendance(query, day, user_id, context):
-    """Сохранение всех временных отметок в таблицу"""
+    """Сохранение всех временных отметок в таблицу с использованием batch-обновления"""
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -1253,23 +1253,37 @@ async def save_attendance(query, day, user_id, context):
         student_col = None
         for idx, cell in enumerate(header):
             if str(cell).strip() == str(student_number):
-                student_col = idx + 1
+                student_col = idx + 1  # +1 потому что gspread использует 1-based индексацию
                 break
         
         if student_col is None:
             await query.edit_message_text("❌ Ошибка: студент не найден в таблице посещаемости")
             return
         
+        # Используем batch update для ускорения
+        updates = []
         updated_count = 0
+        
         for row_num_str, mark in temp_marks.items():
             row_num = int(row_num_str)
-            schedule_sheet.update_cell(row_num, student_col, mark)
+            # Добавляем обновление в batch
+            updates.append({
+                'range': f"{gspread.utils.rowcol_to_a1(row_num, student_col)}",
+                'values': [[mark]]
+            })
             updated_count += 1
+        
+        # Выполняем все обновления одним запросом
+        if updates:
+            schedule_sheet.batch_update(updates)
         
         # Очищаем временные отметки
         del context.user_data['temp_marks'][day_key]
         
-        log_user_action(user_id, username, "Сохранение отметок", f"день: {day}, сохранено: {updated_count}")
+        log_user_action(user_id, username, "Сохранение отметок", f"день: {day}, сохранено: {updated_count} (BATCH)")
+        
+        # Показываем уведомление об успехе
+        await query.answer(f"✅ Сохранено {updated_count} отметок", show_alert=True)
         
         # Возвращаем к списку дней
         await show_days_with_status(query, user_id, week_string, context)
