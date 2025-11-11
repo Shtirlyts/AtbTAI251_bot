@@ -7,6 +7,10 @@ import requests
 import json
 from threading import Thread
 import os
+from functools import wraps
+import time
+import asyncio
+from collections import deque
 
 # Импортируем настройки из config.py
 from config import BOT_TOKEN, SPREADSHEET_URL, ADMIN_ID, EMOJI_MAP, get_google_credentials
@@ -126,12 +130,173 @@ def connect_google_sheets():
         send_log_to_server(error_msg, "error", "critical")
         return None
 
+def retry_google_operation(max_attempts=3, delay=1, backoff=2):
+    """Декоратор для повторных попыток при ошибках Google API"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            current_delay = delay
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if "Quota exceeded" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        wait_time = min(30, current_delay * 3)
+                        logger.warning(f"📊 Превышена квота Google API, ждем {wait_time}сек...")
+                        time.sleep(wait_time)
+                        current_delay *= backoff
+                    elif attempt == max_attempts - 1:
+                        logger.error(f"❌ Все попытки не удались для {func.__name__}: {e}")
+                        raise e
+                    else:
+                        logger.warning(f"🔄 Попытка {attempt + 1}/{max_attempts} не удалась: {e}")
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+            return None
+        return wrapper
+    return decorator
+
+# Оберните существующую функцию connect_google_sheets
+@retry_google_operation(max_attempts=3, delay=2)
+def connect_google_sheets():
+    try:
+        creds_dict = get_google_credentials()
+        if creds_dict:
+            gc = gspread.service_account_from_dict(creds_dict)
+            logger.info("✅ Подключение к Google Sheets через переменные окружения")
+        else:
+            gc = gspread.service_account(filename='credentials.json')
+            logger.info("✅ Подключение к Google Sheets через файл credentials.json")
+        return gc.open_by_url(SPREADSHEET_URL)
+    except Exception as e:
+        error_msg = f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets: {str(e)}"
+        logger.error(error_msg)
+        send_log_to_server(error_msg, "error", "critical")
+        return None
+
 # Глобальные переменные
 db = None
 user_data = {}
 user_states = {}
 week_strings_cache = {}
 
+# Предзагруженные данные для ускорения
+preloaded_data = {
+    'students': None,
+    'schedule_1': None,
+    'schedule_2': None,
+    'last_loaded': 0
+}
+
+def preload_frequent_data():
+    """Предзагрузка часто используемых данных"""
+    try:
+        logger.info("🔄 Предзагрузка частых данных...")
+        preloaded_data['students'] = get_students_data_optimized()
+        preloaded_data['schedule_1'] = get_schedule_data(1)
+        preloaded_data['schedule_2'] = get_schedule_data(2)
+        preloaded_data['last_loaded'] = time.time()
+        logger.info("✅ Предзагрузка завершена")
+    except Exception as e:
+        logger.error(f"❌ Ошибка предзагрузки: {e}")
+
+@retry_google_operation(max_attempts=2, delay=1)
+def get_students_data_optimized():
+    """Оптимизированное получение данных студентов"""
+    students_sheet = db.worksheet("Студенты")
+    return students_sheet.get_all_records()
+
+@retry_google_operation(max_attempts=2, delay=1)
+def get_schedule_data(subgroup):
+    """Получение расписания для подгруппы"""
+    schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+    return schedule_sheet.get_all_values()
+
+@retry_google_operation(max_attempts=2, delay=1) 
+def get_schedule_data_optimized(subgroup):
+    """Оптимизированное получение расписания"""
+    schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+    return schedule_sheet.get_all_values()
+
+# RATE LIMITER 
+class SmartRateLimiter:
+    """Умный ограничитель для активных пользователей бота"""
+    
+    def __init__(self, max_requests=50, period=60, burst_allowance=10):
+        self.requests = {}
+        self.max_requests = max_requests
+        self.period = period
+        self.burst_allowance = burst_allowance
+        self.lock = asyncio.Lock()
+    
+    async def is_allowed(self, user_id):
+        async with self.lock:
+            now = time.time()
+            
+            if user_id not in self.requests:
+                self.requests[user_id] = deque(maxlen=self.max_requests + self.burst_allowance)
+            
+            user_requests = self.requests[user_id]
+            
+            # Удаляем старые запросы (старше периода)
+            while user_requests and now - user_requests[0] > self.period:
+                user_requests.popleft()
+            
+            # Проверяем лимит
+            if len(user_requests) < self.max_requests:
+                user_requests.append(now)
+                return True
+            elif len(user_requests) < self.max_requests + self.burst_allowance:
+                if user_requests and now - user_requests[-1] < 0.5:
+                    return False
+                else:
+                    user_requests.append(now)
+                    return True
+            else:
+                return False
+    async def get_wait_time(self, user_id):
+        """Время до освобождения слота"""
+        async with self.lock:
+            if user_id in self.requests and self.requests[user_id]:
+                oldest_request = self.requests[user_id][0]
+                return max(0, self.period - (time.time() - oldest_request))
+            return 0
+    
+    async def cleanup_old_users(self, max_age=3600):
+        """Очистка неактивных пользователей (раз в час)"""
+        async with self.lock:
+            now = time.time()
+            to_remove = []
+            for user_id, requests in self.requests.items():
+                if not requests or now - requests[-1] > max_age:
+                    to_remove.append(user_id)
+            
+            for user_id in to_remove:
+                del self.requests[user_id]
+
+# Инициализация rate limiters
+button_limiter = SmartRateLimiter(
+    max_requests=60,      # 60 запросов в минуту
+    period=60,            # период 60 секунд  
+    burst_allowance=15    # разрешить 15 быстрых запросов подряд
+)
+
+message_limiter = SmartRateLimiter(
+    max_requests=20,      # 20 сообщений в минуту
+    period=60,
+    burst_allowance=5     # 5 быстрых сообщений подряд
+)
+
+#Функции
+async def background_cleanup():
+    """Фоновая очистка старых записей rate limiter"""
+    while True:
+        await asyncio.sleep(3600)  # Каждый час
+        await button_limiter.cleanup_old_users()
+        await message_limiter.cleanup_old_users()
+        logger.info("🧹 Очистка старых записей rate limiter")
+        send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
+    
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Без username"
@@ -139,8 +304,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     send_log_to_server(f"🟢 /start от {user_id} (@{username})", "command")
     
     try:
-        students_sheet = db.worksheet("Студенты")
-        students_data = students_sheet.get_all_records()
+        students_data = get_students_data_optimized()
 
         user_found = False
         student_data = None
@@ -203,8 +367,7 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user_id, username, "Поиск ФИО", f"'{fio}'")
     
     try:
-        students_sheet = db.worksheet("Студенты")
-        students_data = students_sheet.get_all_records()
+        students_data = get_students_data_optimized()
         
         user_found = False
         student_number = None
@@ -228,7 +391,8 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ ФИО не найдено в базе! Обратитесь к администратору.")
             return
         
-        # Сохраняем Telegram ID
+        # Сохраняем Telegram ID - получаем доступ к таблице
+        students_sheet = db.worksheet("Студенты")
         cell = students_sheet.find(str(student_number))
         students_sheet.update_cell(cell.row, 4, str(user_id))
         
@@ -1312,6 +1476,15 @@ def decode_week_string(encoded_week):
     # Если не найдено, возвращаем текущую неделю как fallback
     return get_current_week_type()
 
+async def background_cleanup():     
+    """Фоновая очистка старых записей rate limiter"""
+    while True:
+        await asyncio.sleep(3600)  # Каждый час
+        await button_limiter.cleanup_old_users()
+        await message_limiter.cleanup_old_users()
+        logger.info("🧹 Очистка старых записей rate limiter")
+        send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
+
 # ГЛАВНЫЙ ОБРАБОТЧИК КНОПОК
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1322,6 +1495,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     try:
+        # Проверка  RATE LIMIT
+        if user_id != ADMIN_ID:
+            try:
+                if not await button_limiter.is_allowed(user_id):
+                    wait_time = await button_limiter.get_wait_time(user_id)
+                    log_user_action(user_id, username, "ПРЕВЫШЕНИЕ ЛИМИТА КНОПОК", 
+                                  f"ожидание: {int(wait_time)}сек", "warning")
+                    
+                    await query.edit_message_text(
+                        f"⏳ Слишком много действий за последнюю минуту.\n"
+                        f"Подождите {int(wait_time)} секунд перед следующим действием."
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"❌ Ошибка в rate limiter: {e}")
+                # Продолжаем выполнение если rate limiter сломался
+                send_log_to_server(f"❌ Ошибка rate limiter: {e}", "rate_limiter_error", "error")
+
         if data == "back_to_main":
             # Возвращаем главное меню
             keyboard = [[InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")]]
@@ -1537,6 +1728,9 @@ def main():
             send_log_to_server("💥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets", "system", "critical")
             return
         
+        # Предзагрузка данных
+        preload_frequent_data()
+        
         send_log_to_server("✅ Бот успешно подключился к Google Sheets", "system", "info")
         application = Application.builder().token(BOT_TOKEN).build()
 
@@ -1548,6 +1742,11 @@ def main():
         application.add_handler(CallbackQueryHandler(button_handler))
 
         logger.info("🤖 Бот запускается...")
+        
+        # Запускаем фоновую задачу очистки
+        loop = asyncio.get_event_loop()
+        loop.create_task(background_cleanup())
+        
         application.run_polling()
         
     except Exception as e:
