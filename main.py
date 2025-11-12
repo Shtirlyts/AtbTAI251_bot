@@ -27,6 +27,30 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+def log_execution_time(func_name):
+    """Декоратор для логирования времени выполнения"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            start_time = time.time()
+            try:
+                result = await func(*args, **kwargs)
+                execution_time = time.time() - start_time
+                
+                # Логируем только если дольше 1 секунды
+                if execution_time > 1.0:
+                    logger.info(f"⏱️ {func_name}: {execution_time:.3f}с")
+                    send_log_to_server(f"⏱️ {func_name}: {execution_time:.3f}с", "performance", "info")
+                
+                return result
+            except Exception as e:
+                execution_time = time.time() - start_time
+                logger.error(f"❌ {func_name} ошибка после {execution_time:.3f}с: {e}")
+                send_log_to_server(f"❌ {func_name} ошибка после {execution_time:.3f}с: {e}", "performance_error", "error")
+                raise
+        return wrapper
+    return decorator
+
 def send_log_to_server(log_message, log_type="bot", level="info"):
     """Отправка логов на наш сервер с московским временем"""
     def send_async():
@@ -192,31 +216,56 @@ def preload_frequent_data():
     """Предзагрузка часто используемых данных"""
     try:
         logger.info("🔄 Предзагрузка частых данных...")
+        send_log_to_server("🔄 Предзагрузка частых данных...", "preload", "info")
+        
         preloaded_data['students'] = get_students_data_optimized()
-        preloaded_data['schedule_1'] = get_schedule_data(1)
-        preloaded_data['schedule_2'] = get_schedule_data(2)
+        preloaded_data['schedule_1'] = get_schedule_data_optimized(1)
+        preloaded_data['schedule_2'] = get_schedule_data_optimized(2)
         preloaded_data['last_loaded'] = time.time()
+        
         logger.info("✅ Предзагрузка завершена")
+        send_log_to_server("✅ Предзагрузка завершена", "preload", "info")
+        
+        # Логируем размер загруженных данных
+        students_count = len(preloaded_data['students']) if preloaded_data['students'] else 0
+        schedule1_count = len(preloaded_data['schedule_1']) if preloaded_data['schedule_1'] else 0
+        schedule2_count = len(preloaded_data['schedule_2']) if preloaded_data['schedule_2'] else 0
+        
+        logger.info(f"📊 Загружено: {students_count} студентов, "
+                   f"{schedule1_count} строк расписания 1, "
+                   f"{schedule2_count} строк расписания 2")
+                   
+        send_log_to_server(f"📊 Загружено: {students_count} студентов, {schedule1_count} строк расписания 1, {schedule2_count} строк расписания 2", "preload_stats", "info")
+                   
     except Exception as e:
         logger.error(f"❌ Ошибка предзагрузки: {e}")
+        send_log_to_server(f"❌ Ошибка предзагрузки: {e}", "preload_error", "error")
 
 @retry_google_operation(max_attempts=2, delay=1)
 def get_students_data_optimized():
     """Оптимизированное получение данных студентов"""
-    students_sheet = db.worksheet("Студенты")
-    return students_sheet.get_all_records()
-
-@retry_google_operation(max_attempts=2, delay=1)
-def get_schedule_data(subgroup):
-    """Получение расписания для подгруппы"""
-    schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-    return schedule_sheet.get_all_values()
+    if preloaded_data['students'] is not None:
+        return preloaded_data['students']
+    else:
+        logger.info("📚 Загрузка данных студентов из Google Sheets")
+        students_sheet = db.worksheet("Студенты")
+        data = students_sheet.get_all_records()
+        preloaded_data['students'] = data
+        return data
 
 @retry_google_operation(max_attempts=2, delay=1) 
 def get_schedule_data_optimized(subgroup):
     """Оптимизированное получение расписания"""
-    schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-    return schedule_sheet.get_all_values()
+    cache_key = f'schedule_{subgroup}'
+    
+    if preloaded_data.get(cache_key) is not None:
+        return preloaded_data[cache_key]
+    else:
+        logger.info(f"📅 Загрузка расписания подгруппы {subgroup} из Google Sheets")
+        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+        data = schedule_sheet.get_all_values()
+        preloaded_data[cache_key] = data
+        return data
 
 # RATE LIMITER 
 class SmartRateLimiter:
@@ -297,6 +346,7 @@ async def background_cleanup():
         logger.info("🧹 Очистка старых записей rate limiter")
         send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
     
+@log_execution_time("start")
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Без username"
@@ -355,6 +405,7 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
         log_user_action(user_id, username, "НЕЗАРЕГИСТРИРОВАННОЕ СООБЩЕНИЕ", text, "warning")
         await update.message.reply_text("Сначала отправьте /start для регистрации")
 
+@log_execution_time("handle_fio")
 async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db is None:
         await update.message.reply_text("❌ Ошибка подключения к базе данных.")
@@ -1002,6 +1053,7 @@ async def admin_temp_toggle_class_cancellation(query, week_string, day, subgroup
 
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
+@log_execution_time("show_week_selection")
 async def show_week_selection(query, user_id):
     """Показ выбора недели"""
     if user_id not in user_data:
@@ -1016,8 +1068,7 @@ async def show_week_selection(query, user_id):
         log_user_action(user_id, username, "Выбор недели для отметки")
         
         # Получаем данные расписания для проверки наличия недель
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        schedule_data = schedule_sheet.get_all_values()
+        schedule_data = get_schedule_data_optimized(subgroup)
         
         # Получаем информацию о неделях
         current_week_info = get_week_info(0)  # Текущая неделя
@@ -1079,6 +1130,7 @@ async def show_week_selection(query, user_id):
         logger.error(f"❌ Ошибка в show_week_selection: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
+@log_execution_time("show_days_with_status")
 async def show_days_with_status(query, user_id, week_string=None, context=None):
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
@@ -1095,8 +1147,9 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
         week_type = get_current_week_type()
     
     try:
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        schedule_data = schedule_sheet.get_all_values()
+        # 🔄 ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ ДАННЫЕ ДЛЯ АКТУАЛЬНОСТИ
+        schedule_data = get_schedule_data_optimized(subgroup)
+        
         day_status = {}
         
         for row in schedule_data[1:]:
@@ -1156,6 +1209,7 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
         logger.error(f"❌ Ошибка в show_days_with_status: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
+@log_execution_time("show_subjects")
 async def show_subjects(query, day, user_id, week_string=None, context=None):
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
@@ -1176,8 +1230,7 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
     log_user_action(user_id, username, f"Просмотр предметов", f"день: {day}")
     
     try:
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        schedule_data = schedule_sheet.get_all_values()
+        schedule_data = get_schedule_data_optimized(subgroup)
         subjects_with_status = []
         header = schedule_data[0]
         
@@ -1304,6 +1357,7 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
         logger.error(f"❌ Ошибка в show_subjects: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
 
+@log_execution_time("show_subject_actions")
 async def show_subject_actions(query, day, row_num):
     """Показать выбор действия для предмета"""
     keyboard = [
@@ -1321,8 +1375,8 @@ async def show_subject_actions(query, day, row_num):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("Выберите действие для отметки:", reply_markup=reply_markup)
 
+@log_execution_time("temp_mark_attendance")
 async def temp_mark_attendance(query, day, row_num, action, user_id, context):
-    """Временное сохранение отметки (без записи в таблицу)"""
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -1345,19 +1399,17 @@ async def temp_mark_attendance(query, day, row_num, action, user_id, context):
         context.user_data['temp_marks'][day_key] = {}
     
     if row_num == "all":
-        # Для массовой отметки нужно получить все row_num этого дня
+        # Для массовой отметки используем кэшированные данные
         subgroup = student_data['subgroup']
         try:
-            schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-            schedule_data = schedule_sheet.get_all_values()
+            schedule_data = get_schedule_data_optimized(subgroup)
             
-            # Ищем строки для этого дня и недели
             found_rows = 0
             for i, row in enumerate(schedule_data[1:], start=2):
                 if len(row) > 2 and row[0] == week_string and row[1] == day:
-                    # проверка на отмену пары
+                    # Проверка на отмену пары из кэша
                     is_cancelled = any('⚙️' in str(cell) for cell in row[3:])
-                    if not is_cancelled:  # Только если пара не отменена
+                    if not is_cancelled:
                         context.user_data['temp_marks'][day_key][str(i)] = mark
                         found_rows += 1
                     
@@ -1368,24 +1420,28 @@ async def temp_mark_attendance(query, day, row_num, action, user_id, context):
             await query.answer("❌ Ошибка при массовой отметке", show_alert=True)
             return
     else:
-        # Одиночная отметка
+        # Одиночная отметка - используем кэшированные данные
         subgroup = student_data['subgroup']
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        row_data = schedule_sheet.row_values(int(row_num))
-        is_cancelled = any('⚙️' in str(cell) for cell in row_data[3:])
+        schedule_data = get_schedule_data_optimized(subgroup)
         
-        if is_cancelled:
-            await query.answer("❌ Эта пара была отменена администратором", show_alert=True)
-            return
-        
-        context.user_data['temp_marks'][day_key][row_num] = mark
-        logger.info(f"✅ Одиночная отметка: строка {row_num} отмечена как '{mark}'")
+        # Преобразуем row_num в индекс (row_num начинается с 2, данные с 1)
+        row_index = int(row_num) - 1
+        if row_index < len(schedule_data):
+            row_data = schedule_data[row_index]
+            is_cancelled = any('⚙️' in str(cell) for cell in row_data[3:])
+            
+            if is_cancelled:
+                await query.answer("❌ Эта пара была отменена администратором", show_alert=True)
+                return
+            
+            context.user_data['temp_marks'][day_key][row_num] = mark
+            logger.info(f"✅ Одиночная отметка: строка {row_num} отмечена как '{mark}'")
     
     # Возвращаем к списку предметов с обновленными статусами
     await show_subjects(query, day, user_id, week_string, context)
 
+@log_execution_time("save_attendance")
 async def save_attendance(query, day, user_id, context):
-    """Сохранение всех временных отметок в таблицу с использованием batch-обновления"""
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
@@ -1411,45 +1467,27 @@ async def save_attendance(query, day, user_id, context):
         return
     
     try:
-        schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
-        header = schedule_sheet.row_values(1)
+        # Показываем сообщение о начале сохранения
+        await query.edit_message_text("💾 Сохранение отметок...")
         
-        student_col = None
-        for idx, cell in enumerate(header):
-            if str(cell).strip() == str(student_number):
-                student_col = idx + 1  # +1 потому что gspread использует 1-based индексацию
-                break
+        # Асинхронно выполняем сохранение
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: save_attendance_sync(subgroup, student_number, temp_marks))
         
-        if student_col is None:
-            await query.edit_message_text("❌ Ошибка: студент не найден в таблице посещаемости")
-            return
-        
-        # Используем batch update для ускорения
-        updates = []
-        updated_count = 0
-        
-        for row_num_str, mark in temp_marks.items():
-            row_num = int(row_num_str)
-            # Добавляем обновление в batch
-            updates.append({
-                'range': f"{gspread.utils.rowcol_to_a1(row_num, student_col)}",
-                'values': [[mark]]
-            })
-            updated_count += 1
-        
-        # Выполняем все обновления одним запросом
-        if updates:
-            schedule_sheet.batch_update(updates)
+        # 🔄 ОБНОВЛЯЕМ КЭШ ПОСЛЕ СОХРАНЕНИЯ
+        cache_key = f'schedule_{subgroup}'
+        preloaded_data[cache_key] = None  # Инвалидируем кэш
+        logger.info(f"🔄 Кэш расписания подгруппы {subgroup} обновлен после сохранения")
         
         # Очищаем временные отметки
         del context.user_data['temp_marks'][day_key]
         
-        log_user_action(user_id, username, "Сохранение отметок", f"день: {day}, сохранено: {updated_count} (BATCH)")
+        log_user_action(user_id, username, "Сохранение отметок", f"день: {day}, сохранено: {len(temp_marks)} (BATCH)")
         
         # Показываем уведомление об успехе
-        await query.answer(f"✅ Сохранено {updated_count} отметок", show_alert=True)
+        await query.answer(f"✅ Сохранено {len(temp_marks)} отметок", show_alert=True)
         
-        # Возвращаем к списку дней
+        # Возвращаем к списку дней (с обновленными статусами)
         await show_days_with_status(query, user_id, week_string, context)
         
     except Exception as e:
@@ -1457,6 +1495,33 @@ async def save_attendance(query, day, user_id, context):
         logger.error(error_msg)
         log_user_action(user_id, username, "ОШИБКА СОХРАНЕНИЯ", f"{day} - {str(e)}", "error")
         await query.edit_message_text("❌ Ошибка при сохранении отметок")
+
+def save_attendance_sync(subgroup, student_number, temp_marks):
+    """Синхронная версия сохранения отметок"""
+    schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
+    header = schedule_sheet.row_values(1)
+    
+    student_col = None
+    for idx, cell in enumerate(header):
+        if str(cell).strip() == str(student_number):
+            student_col = idx + 1
+            break
+    
+    if student_col is None:
+        raise ValueError("Студент не найден в таблице посещаемости")
+    
+    # Используем batch update для ускорения
+    updates = []
+    for row_num_str, mark in temp_marks.items():
+        row_num = int(row_num_str)
+        updates.append({
+            'range': f"{gspread.utils.rowcol_to_a1(row_num, student_col)}",
+            'values': [[mark]]
+        })
+    
+    # Выполняем все обновления одним запросом
+    if updates:
+        schedule_sheet.batch_update(updates)
 
 # УТИЛИТЫ
 def encode_week_string(week_string):
@@ -1486,6 +1551,7 @@ async def background_cleanup():
         send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
 
 # ГЛАВНЫЙ ОБРАБОТЧИК КНОПОК
+@log_execution_time("button_handler")
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
