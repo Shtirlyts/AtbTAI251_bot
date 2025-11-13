@@ -140,23 +140,6 @@ def get_current_week_type():
         # Fallback
         return "Числитель - 8 неделя"
 
-# Подключение к Google Sheets
-def connect_google_sheets():
-    try:
-        creds_dict = get_google_credentials()
-        if creds_dict:
-            gc = gspread.service_account_from_dict(creds_dict)
-            logger.info("✅ Подключение к Google Sheets через переменные окружения")
-        else:
-            gc = gspread.service_account(filename='credentials.json')
-            logger.info("✅ Подключение к Google Sheets через файл credentials.json")
-        return gc.open_by_url(SPREADSHEET_URL)
-    except Exception as e:
-        error_msg = f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets: {str(e)}"
-        logger.error(error_msg)
-        send_log_to_server(error_msg, "error", "critical")
-        return None
-
 def retry_google_operation(max_attempts=3, delay=1, backoff=2):
     """Декоратор для повторных попыток при ошибках Google API"""
     def decorator(func):
@@ -183,7 +166,6 @@ def retry_google_operation(max_attempts=3, delay=1, backoff=2):
         return wrapper
     return decorator
 
-# Оберните существующую функцию connect_google_sheets
 @retry_google_operation(max_attempts=3, delay=2)
 def connect_google_sheets():
     try:
@@ -258,16 +240,18 @@ def get_students_data_optimized():
 
 @retry_google_operation(max_attempts=2, delay=1) 
 def get_schedule_data_optimized(subgroup):
-    """Оптимизированное получение расписания"""
     cache_key = f'schedule_{subgroup}'
     
-    if preloaded_data.get(cache_key) is not None:
+    # Проверяем актуальность кэша (10 минут)
+    if (preloaded_data.get(cache_key) is not None and 
+        time.time() - preloaded_data['last_loaded'] < 600):
         return preloaded_data[cache_key]
     else:
         logger.info(f"📅 Загрузка расписания подгруппы {subgroup} из Google Sheets")
         schedule_sheet = db.worksheet(f"{subgroup} подгруппа")
         data = schedule_sheet.get_all_values()
         preloaded_data[cache_key] = data
+        preloaded_data['last_loaded'] = time.time()
         return data
 
 # RATE LIMITER 
@@ -339,8 +323,8 @@ message_limiter = SmartRateLimiter(
     burst_allowance=5     # 5 быстрых сообщений подряд
 )
 
-#Функции
-async def background_cleanup():
+#Функции  
+async def background_cleanup():     
     """Фоновая очистка старых записей rate limiter"""
     while True:
         await asyncio.sleep(3600)  # Каждый час
@@ -348,7 +332,7 @@ async def background_cleanup():
         await message_limiter.cleanup_old_users()
         logger.info("🧹 Очистка старых записей rate limiter")
         send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
-    
+
 @log_execution_time("start")
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -475,6 +459,20 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user_id, username, "ОШИБКА РЕГИСТРАЦИИ", str(e), "error")
         await update.message.reply_text("❌ Произошла ошибка при регистрации. Попробуйте позже.")
 
+async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "Без username"
+    text = update.message.text
+    
+    # 🔥 ЛОГИРУЕМ КАЖДОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ
+    log_user_action(user_id, username, "СООБЩЕНИЕ", f"Текст: '{text}'", "info")
+    
+    if user_states.get(user_id) == "waiting_for_fio":
+        await handle_fio(update, context)
+    else:
+        log_user_action(user_id, username, "НЕЗАРЕГИСТРИРОВАННОЕ СООБЩЕНИЕ", text, "warning")
+        await update.message.reply_text("Сначала отправьте /start для регистрации")
+
 # АДМИН-ФУНКЦИИ
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -491,6 +489,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
         [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
         [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+        [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     
@@ -523,7 +522,7 @@ async def admin_show_students(query):
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
 async def admin_show_status(query):
-    """Показать статус сервера"""
+    """Упрощенный статус сервера"""
     user_id = query.from_user.id
     username = query.from_user.username or "Без username"
     
@@ -534,50 +533,76 @@ async def admin_show_status(query):
     log_user_action(user_id, username, "Запрос статуса сервера")
     
     try:
-        import psutil
-        import platform
-        
-        # Показываем сообщение о начале сбора данных
         await query.edit_message_text("📊 Сбор данных о системе...")
         
-        # Информация о системе
-        system_info = f"🖥️ **Система**: {platform.system()} {platform.release()}\n"
+        # 1. СТАТУС ПОДКЛЮЧЕНИЙ
+        connections_status = "**🔗 СТАТУС ПОДКЛЮЧЕНИЙ**\n"
+        if db is None:
+            connections_status += "❌ **Google Sheets**: НЕТ ПОДКЛЮЧЕНИЯ\n"
+        else:
+            connections_status += "✅ **Google Sheets**: подключено\n"
+            
+            try:
+                students_sheet = db.worksheet("Студенты")
+                students_count = len(students_sheet.get_all_values()) - 1
+                connections_status += f"✅ **Студенты**: {students_count} записей\n"
+                
+                subgroup1 = db.worksheet("1 подгруппа")
+                subgroup2 = db.worksheet("2 подгруппа") 
+                connections_status += "✅ **Расписание**: доступно\n"
+            except Exception as e:
+                connections_status += f"❌ **Ошибка таблиц**: {str(e)[:50]}...\n"
         
-        # Текущая нагрузка CPU
-        cpu_percent = psutil.cpu_percent(interval=1)
-        cpu_info = f"⚡ **CPU**: {cpu_percent}%\n"
+        # 2. СТАТИСТИКА БОТА
+        bot_stats = "\n**🤖 СТАТИСТИКА БОТА**\n"
+        bot_stats += f"• Пользователей: {len(user_data)}\n"
+        bot_stats += f"• Активных сессий: {len(user_states)}\n"
         
-        # Память
-        memory = psutil.virtual_memory()
-        memory_info = f"💾 **Память**: {memory.percent}%\n"
-        memory_info += f"💽 **Использовано**: {memory.used//1024//1024}MB / {memory.total//1024//1024}MB\n"
+        # Статистика по состояниям
+        state_counts = {}
+        for state in user_states.values():
+            state_counts[state] = state_counts.get(state, 0) + 1
         
-        # Использование диска
-        disk = psutil.disk_usage('/')
-        disk_info = f"📀 **Диск**: {disk.percent}% ({disk.used//1024//1024//1024}GB/{disk.total//1024//1024//1024}GB)\n"
+        for state, count in state_counts.items():
+            bot_stats += f"• {state}: {count}\n"
         
-        # Время работы
-        boot_time = psutil.boot_time()
-        uptime = datetime.now() - datetime.fromtimestamp(boot_time)
-        uptime_days = uptime.days
-        uptime_hours = uptime.seconds // 3600
-        uptime_minutes = (uptime.seconds % 3600) // 60
-        uptime_info = f"⏱️ **Аптайм**: {uptime_days}д {uptime_hours}ч {uptime_minutes}м\n"
+        # 3. КЭШ И ПРОИЗВОДИТЕЛЬНОСТЬ
+        cache_info = "\n**💾 КЭШ ДАННЫХ**\n"
+        if preloaded_data['last_loaded'] > 0:
+            cache_age = time.time() - preloaded_data['last_loaded']
+            cache_minutes = int(cache_age // 60)
+            cache_seconds = int(cache_age % 60)
+            cache_info += f"• Возраст: {cache_minutes}м {cache_seconds}с\n"
+            
+            students_cached = len(preloaded_data.get('students', []))
+            schedule1_cached = len(preloaded_data.get('schedule_1', []))
+            schedule2_cached = len(preloaded_data.get('schedule_2', []))
+            
+            cache_info += f"• Студентов: {students_cached}\n"
+            cache_info += f"• Расписание 1: {schedule1_cached} строк\n"
+            cache_info += f"• Расписание 2: {schedule2_cached} строк\n"
+            
+            if cache_age > 600:
+                cache_info += "⚠️ **Кэш устарел** (>10 минут)\n"
+            else:
+                cache_info += "✅ **Кэш актуален**\n"
+        else:
+            cache_info += "❌ **Кэш не загружен**\n"
         
-        # Статистика бота
-        bot_stats = "🤖 **Статистика бота**:\n"
-        bot_stats += f"   • Пользователей: {len(user_data)}\n"
-        bot_stats += f"   • Активных сессий: {len(user_states)}\n"
-        bot_stats += f"   • Кэш студентов: {len(preloaded_data.get('students', []))}\n"
+        # 4. RATE LIMITER
+        rate_info = "\n**🚦 RATE LIMITING**\n"
+        try:
+            rate_info += f"• Отслеживается: {len(button_limiter.requests)} пользователей\n"
+        except:
+            rate_info += "• Статистика недоступна\n"
         
+        # 5. ОБЩИЙ СТАТУС
         status_text = (
-            "**🖥️ Статус сервера**\n\n"
-            f"{system_info}"
-            f"{cpu_info}"
-            f"{memory_info}"
-            f"{disk_info}"
-            f"{uptime_info}\n"
-            f"{bot_stats}"
+            "**🖥️ СТАТУС СИСТЕМЫ**\n\n"
+            f"{connections_status}"
+            f"{bot_stats}" 
+            f"{cache_info}"
+            f"{rate_info}"
         )
         
         keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
@@ -586,7 +611,7 @@ async def admin_show_status(query):
         await query.edit_message_text(status_text, parse_mode='Markdown', reply_markup=reply_markup)
         
     except Exception as e:
-        error_text = f"❌ Ошибка при получении статуса сервера: {str(e)}"
+        error_text = f"❌ Ошибка при получении статуса: {str(e)}"
         logger.error(error_text)
         
         keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
@@ -1034,49 +1059,6 @@ async def admin_save_class_cancellations(query, week_string, day, subgroup, cont
             await admin_show_presence_subjects(query, week_string, day, subgroup, context)
         except:
             await query.edit_message_text(f"❌ Ошибка при сохранении изменений: {str(e)}")
-
-async def admin_temp_toggle_class_cancellation(query, week_string, day, subgroup, row_num, action, context):
-    """Временное изменение статуса пары (без сохранения в таблицу)"""
-    user_id = query.from_user.id
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ У вас нет доступа")
-        return
-    
-    try:
-        # Инициализируем временное хранилище
-        if 'temp_cancellations' not in context.user_data:
-            context.user_data['temp_cancellations'] = {}
-        
-        week_key = f"{week_string}_{day}_{subgroup}"
-        if week_key not in context.user_data['temp_cancellations']:
-            context.user_data['temp_cancellations'][week_key] = {}
-        
-        # Сохраняем временное изменение
-        context.user_data['temp_cancellations'][week_key][str(row_num)] = action
-        
-        message = "✅ Временное изменение применено (нажмите 'Сохранить' для подтверждения)"
-        await query.answer(message, show_alert=False)
-        
-        # Используем новую функцию для показа предметов
-        await admin_show_presence_subjects_new(query, week_string, day, subgroup, context)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка в admin_temp_toggle_class_cancellation: {e}")
-        await query.answer("❌ Ошибка при изменении статуса пары", show_alert=True)
-
-def get_students_data_optimized():
-    """Оптимизированное получение данных студентов с проверкой актуальности"""
-    # Проверяем, не устарели ли данные (больше 10 минут)
-    if (preloaded_data['students'] is not None and 
-        time.time() - preloaded_data['last_loaded'] < 600):  # 10 минут
-        return preloaded_data['students']
-    else:
-        logger.info("📚 Загрузка данных студентов из Google Sheets")
-        students_sheet = db.worksheet("Студенты")
-        data = students_sheet.get_all_records()
-        preloaded_data['students'] = data
-        preloaded_data['last_loaded'] = time.time()
-        return data
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 @log_execution_time("show_week_selection")
@@ -1567,15 +1549,6 @@ def decode_week_string(encoded_week):
     # Если не найдено, возвращаем текущую неделю как fallback
     return get_current_week_type()
 
-async def background_cleanup():     
-    """Фоновая очистка старых записей rate limiter"""
-    while True:
-        await asyncio.sleep(3600)  # Каждый час
-        await button_limiter.cleanup_old_users()
-        await message_limiter.cleanup_old_users()
-        logger.info("🧹 Очистка старых записей rate limiter")
-        send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
-
 # ГЛАВНЫЙ ОБРАБОТЧИК КНОПОК
 @log_execution_time("button_handler")
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1585,6 +1558,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     username = query.from_user.username or "Без username"
     data = query.data
+    
+    # Проверка доступности базы данных
+    if db is None:
+        await query.edit_message_text("❌ Временная проблема с подключением. Попробуйте позже.")
+        log_user_action(user_id, username, "ОШИБКА БАЗЫ ДАННЫХ", data, "error")
+        return
     
     try:
         # Проверка  RATE LIMIT
@@ -1647,8 +1626,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_class_presence(query)
         elif data == "admin_presence_week":
             await admin_show_presence_week_selection(query)
-        elif data == "admin_presence_week":
-            await admin_show_presence_week_selection(query)
+        elif data == "admin_refresh_cache":
+            if user_id == ADMIN_ID:
+                await query.edit_message_text("🔄 Обновление кэша...")
+                try:
+                    preload_frequent_data()
+                    await query.answer("✅ Кэш обновлен", show_alert=True)
+                    await admin_panel(update, context)  # Возвращаем в админ-панель
+                except Exception as e:
+                    await query.answer(f"❌ Ошибка: {str(e)[:50]}", show_alert=True)
+            else:
+                await query.answer("❌ Нет доступа", show_alert=True)
         elif data.startswith("apw_"):
             week_encoded = data[4:]
             try:
@@ -1789,57 +1777,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         error_msg = f"❌ Ошибка в button_handler {user_id}: {str(e)} | callback: {data}"
         logger.error(error_msg)
         send_log_to_server(error_msg, "error", "error")
-        await query.edit_message_text("❌ Произошла ошибка при обработке запроса")
-
-#Недостающие простые функции
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in user_data:
-        student_data = user_data[user_id]
-        await update.message.reply_text(f"📊 Ваш статус:\nФИО: {student_data['fio']}\nПодгруппа: {student_data['subgroup']}")
-    else:
-        await update.message.reply_text("❌ Сначала зарегистрируйтесь через /start")
-
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id == ADMIN_ID:
-        logger.critical("🛑 Выключение бота по команде администратора")
-        await update.message.reply_text("🛑 Бот выключается...")
-        os._exit(0)
-    else:
-        await update.message.reply_text("❌ У вас нет прав для этой команды")
+        
+        # Пытаемся отправить понятное сообщение пользователю
+        try:
+            await query.edit_message_text("❌ Произошла внутренняя ошибка. Попробуйте позже или перезапустите бота через /start")
+        except:
+            try:
+                await context.bot.send_message(user_id, "❌ Произошла ошибка. Используйте /start для перезапуска")
+            except:
+                pass
 
 def main():
     global db
-    logger.info(f"🚀 ЗАПУСК БОТА: Окружение - {'СЕРВЕР' if os.path.exists('/root/AtbTAI251_bot') else 'ЛОКАЛЬНОЕ'}")
+    logger.info(f"🚀 ЗАПУСК БОТА...")
     send_log_to_server("🚀 ЗАПУСК БОТА: Инициализация...", "system", "info")
     
     try:
         db = connect_google_sheets()
         if db is None:
             send_log_to_server("💥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets", "system", "critical")
-            return
+            
+            # Попытка повторного подключения через 30 секунд
+            logger.info("🔄 Попытка повторного подключения через 30 секунд...")
+            time.sleep(30)
+            db = connect_google_sheets()
+            
+            if db is None:
+                logger.critical("💥 Бот не может работать без подключения к Google Sheets")
+                return
         
         # Предзагрузка данных
         preload_frequent_data()
         
-        send_log_to_server("✅ Бот успешно подключился к Google Sheets", "system", "info")
         application = Application.builder().token(BOT_TOKEN).build()
 
         application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("admin", admin_panel))
-        application.add_handler(CommandHandler("status", status_command))
-        application.add_handler(CommandHandler("stop", stop_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
         application.add_handler(CallbackQueryHandler(button_handler))
 
         logger.info("🤖 Бот запускается...")
         
-        # Запускаем фоновую задачу очистки
+        # Запускаем фоновые задачи
         loop = asyncio.get_event_loop()
         loop.create_task(background_cleanup())
         
-        application.run_polling()
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
         error_msg = f"💥 КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ: {str(e)}"
