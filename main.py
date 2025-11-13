@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-def log_execution_time(func_name):
-    """Декоратор для логирования времени выполнения"""
+def log_execution_time(func_name, slow_threshold=2.0):
+    """Декоратор для логирования времени выполнения с настраиваемым порогом"""
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -37,8 +37,11 @@ def log_execution_time(func_name):
                 result = await func(*args, **kwargs)
                 execution_time = time.time() - start_time
                 
-                # Логируем только если дольше 1 секунды
-                if execution_time > 1.0:
+                # Логируем только если дольше порога
+                if execution_time > slow_threshold:
+                    logger.warning(f"🐌 {func_name}: {execution_time:.3f}с (медленно)")
+                    send_log_to_server(f"🐌 {func_name}: {execution_time:.3f}с", "performance_slow", "warning")
+                elif execution_time > 1.0:
                     logger.info(f"⏱️ {func_name}: {execution_time:.3f}с")
                     send_log_to_server(f"⏱️ {func_name}: {execution_time:.3f}с", "performance", "info")
                 
@@ -534,28 +537,38 @@ async def admin_show_status(query):
         import psutil
         import platform
         
+        # Показываем сообщение о начале сбора данных
+        await query.edit_message_text("📊 Сбор данных о системе...")
+        
         # Информация о системе
         system_info = f"🖥️ **Система**: {platform.system()} {platform.release()}\n"
         
-        # Использование CPU
+        # Текущая нагрузка CPU
         cpu_percent = psutil.cpu_percent(interval=1)
         cpu_info = f"⚡ **CPU**: {cpu_percent}%\n"
         
-        # Использование памяти
+        # Память
         memory = psutil.virtual_memory()
-        memory_info = f"💾 **Память**: {memory.percent}% ({memory.used//1024//1024}MB/{memory.total//1024//1024}MB)\n"
+        memory_info = f"💾 **Память**: {memory.percent}%\n"
+        memory_info += f"💽 **Использовано**: {memory.used//1024//1024}MB / {memory.total//1024//1024}MB\n"
         
         # Использование диска
         disk = psutil.disk_usage('/')
-        disk_info = f"💽 **Диск**: {disk.percent}% ({disk.used//1024//1024//1024}GB/{disk.total//1024//1024//1024}GB)\n"
+        disk_info = f"📀 **Диск**: {disk.percent}% ({disk.used//1024//1024//1024}GB/{disk.total//1024//1024//1024}GB)\n"
         
         # Время работы
         boot_time = psutil.boot_time()
         uptime = datetime.now() - datetime.fromtimestamp(boot_time)
-        uptime_info = f"⏱️ **Аптайм**: {str(uptime).split('.')[0]}\n"
+        uptime_days = uptime.days
+        uptime_hours = uptime.seconds // 3600
+        uptime_minutes = (uptime.seconds % 3600) // 60
+        uptime_info = f"⏱️ **Аптайм**: {uptime_days}д {uptime_hours}ч {uptime_minutes}м\n"
         
         # Статистика бота
-        bot_info = f"🤖 **Пользователей**: {len(user_data)}\n"
+        bot_stats = "🤖 **Статистика бота**:\n"
+        bot_stats += f"   • Пользователей: {len(user_data)}\n"
+        bot_stats += f"   • Активных сессий: {len(user_states)}\n"
+        bot_stats += f"   • Кэш студентов: {len(preloaded_data.get('students', []))}\n"
         
         status_text = (
             "**🖥️ Статус сервера**\n\n"
@@ -563,8 +576,8 @@ async def admin_show_status(query):
             f"{cpu_info}"
             f"{memory_info}"
             f"{disk_info}"
-            f"{uptime_info}"
-            f"{bot_info}"
+            f"{uptime_info}\n"
+            f"{bot_stats}"
         )
         
         keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
@@ -1051,6 +1064,19 @@ async def admin_temp_toggle_class_cancellation(query, week_string, day, subgroup
         logger.error(f"❌ Ошибка в admin_temp_toggle_class_cancellation: {e}")
         await query.answer("❌ Ошибка при изменении статуса пары", show_alert=True)
 
+def get_students_data_optimized():
+    """Оптимизированное получение данных студентов с проверкой актуальности"""
+    # Проверяем, не устарели ли данные (больше 10 минут)
+    if (preloaded_data['students'] is not None and 
+        time.time() - preloaded_data['last_loaded'] < 600):  # 10 минут
+        return preloaded_data['students']
+    else:
+        logger.info("📚 Загрузка данных студентов из Google Sheets")
+        students_sheet = db.worksheet("Студенты")
+        data = students_sheet.get_all_records()
+        preloaded_data['students'] = data
+        preloaded_data['last_loaded'] = time.time()
+        return data
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 @log_execution_time("show_week_selection")
