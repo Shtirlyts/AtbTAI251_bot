@@ -11,6 +11,7 @@ from functools import wraps
 import time
 import asyncio
 from collections import deque
+import psutil
 
 # Импортируем настройки из config.py
 from config import BOT_TOKEN, SPREADSHEET_URL, ADMIN_ID, EMOJI_MAP, get_google_credentials
@@ -254,6 +255,52 @@ def get_schedule_data_optimized(subgroup):
         preloaded_data['last_loaded'] = time.time()
         return data
 
+def get_week_status(user_id, week_string):
+    """Получить статус недели для пользователя"""
+    if user_id not in user_data:
+        return '❓'
+    
+    student_data = user_data[user_id]
+    subgroup = student_data['subgroup']
+    student_number = student_data['number']
+    
+    try:
+        schedule_data = get_schedule_data_optimized(subgroup)
+        header = schedule_data[0]
+        
+        # Находим колонку студента
+        student_col = None
+        for idx, cell in enumerate(header):
+            if str(cell).strip() == str(student_number):
+                student_col = idx
+                break
+        
+        if student_col is None:
+            return '❓'
+        
+        total_classes = 0
+        marked_classes = 0
+        
+        # Быстрый подсчет пар
+        for row in schedule_data[1:]:
+            if len(row) > 2 and row[0] == week_string:
+                total_classes += 1
+                if len(row) > student_col and row[student_col].strip() in EMOJI_MAP.values():
+                    marked_classes += 1
+        
+        if total_classes == 0:
+            return '⚫'
+        elif marked_classes == total_classes:
+            return '✅'
+        elif marked_classes > 0:
+            return '🟡'
+        else:
+            return '❌'
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_week_status: {e}")
+        return '❓'
+
 # RATE LIMITER 
 class SmartRateLimiter:
     """Умный ограничитель для активных пользователей бота"""
@@ -290,6 +337,7 @@ class SmartRateLimiter:
                     return True
             else:
                 return False
+    
     async def get_wait_time(self, user_id):
         """Время до освобождения слота"""
         async with self.lock:
@@ -323,7 +371,7 @@ message_limiter = SmartRateLimiter(
     burst_allowance=5     # 5 быстрых сообщений подряд
 )
 
-#Функции  
+# Функции  
 async def background_cleanup():     
     """Фоновая очистка старых записей rate limiter"""
     while True:
@@ -459,20 +507,6 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user_id, username, "ОШИБКА РЕГИСТРАЦИИ", str(e), "error")
         await update.message.reply_text("❌ Произошла ошибка при регистрации. Попробуйте позже.")
 
-async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Без username"
-    text = update.message.text
-    
-    # 🔥 ЛОГИРУЕМ КАЖДОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ
-    log_user_action(user_id, username, "СООБЩЕНИЕ", f"Текст: '{text}'", "info")
-    
-    if user_states.get(user_id) == "waiting_for_fio":
-        await handle_fio(update, context)
-    else:
-        log_user_action(user_id, username, "НЕЗАРЕГИСТРИРОВАННОЕ СООБЩЕНИЕ", text, "warning")
-        await update.message.reply_text("Сначала отправьте /start для регистрации")
-
 # АДМИН-ФУНКЦИИ
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -522,7 +556,7 @@ async def admin_show_students(query):
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
 async def admin_show_status(query):
-    """Упрощенный статус сервера"""
+    """Статус сервера с системной информацией"""
     user_id = query.from_user.id
     username = query.from_user.username or "Без username"
     
@@ -596,13 +630,37 @@ async def admin_show_status(query):
         except:
             rate_info += "• Статистика недоступна\n"
         
-        # 5. ОБЩИЙ СТАТУС
+        # 5. СИСТЕМНАЯ ИНФОРМАЦИЯ (ТЕКУЩИЕ ЗНАЧЕНИЯ)
+        system_info = "\n**💻 СИСТЕМНАЯ ИНФОРМАЦИЯ**\n"
+        try:
+            # Процессор
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            system_info += f"• CPU: {cpu_percent:.1f}%\n"
+            
+            # Память
+            memory = psutil.virtual_memory()
+            system_info += f"• RAM: {memory.percent:.1f}% ({memory.used // (1024**3)}/{memory.total // (1024**3)} GB)\n"
+            
+            # Диск
+            disk = psutil.disk_usage('/')
+            system_info += f"• Disk: {disk.percent:.1f}% ({disk.used // (1024**3)}/{disk.total // (1024**3)} GB)\n"
+            
+            # Процесс бота
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            system_info += f"• Бот RAM: {memory_info.rss // (1024**2)} MB\n"
+            
+        except Exception as e:
+            system_info += f"• Ошибка: {str(e)[:50]}\n"
+        
+        # 6. ОБЩИЙ СТАТУС
         status_text = (
             "**🖥️ СТАТУС СИСТЕМЫ**\n\n"
             f"{connections_status}"
             f"{bot_stats}" 
             f"{cache_info}"
             f"{rate_info}"
+            f"{system_info}"
         )
         
         keyboard = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]]
@@ -633,28 +691,49 @@ async def admin_class_presence(query):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("📊 Управление наличием пар:", reply_markup=reply_markup)
 
-async def admin_show_presence_subgroups(query, week_string, day):
-    """Показ выбора подгруппы для управления наличием пар"""
+async def admin_show_presence_week_selection(query):
+    """Показ выбора недели для управления наличием пар"""
     user_id = query.from_user.id
     if user_id != ADMIN_ID:
         await query.edit_message_text("❌ У вас нет доступа")
         return
     
-    keyboard = [
-        [
-            InlineKeyboardButton("1 подгруппа", callback_data=f"apsg_{encode_week_string(week_string)}_{day}_1"),
-            InlineKeyboardButton("2 подгруппа", callback_data=f"apsg_{encode_week_string(week_string)}_{day}_2")
-        ],
-        [InlineKeyboardButton("🔙 Назад", callback_data=f"apw_{encode_week_string(week_string)}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        f"📅 {week_string}\n"
-        f"📅 {day}\n\n"
-        "Выберите подгруппу:",
-        reply_markup=reply_markup
-    )
+    try:
+        # Получаем информацию о неделях
+        current_week_info = get_week_info(0)
+        previous_week_info = get_week_info(-1)
+        
+        keyboard = []
+        
+        if current_week_info:
+            week_encoded = encode_week_string(current_week_info['string'])
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📅 {current_week_info['string']}", 
+                    callback_data=f"apw_{week_encoded}"
+                )
+            ])
+        
+        if previous_week_info:
+            week_encoded = encode_week_string(previous_week_info['string'])
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"↩️ {previous_week_info['string']}", 
+                    callback_data=f"apw_{week_encoded}"
+                )
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_class_presence")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "Выберите неделю для управления наличием пар:",
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в admin_show_presence_week_selection: {e}")
+        await query.edit_message_text("❌ Ошибка при загрузке недель")
 
 async def admin_show_presence_days(query, week_string):
     """Показ дней недели со статусом отмененных пар"""
@@ -729,7 +808,6 @@ async def admin_show_presence_days(query, week_string):
                 status_text = " ⚫"
             
             week_encoded = encode_week_string(week_string)
-            # Используем полное название дня в callback_data чтобы избежать путаницы
             callback_data = f"apd_{week_encoded}_{day}"
             keyboard.append([InlineKeyboardButton(f"{day}{status_text}", callback_data=callback_data)])
         
@@ -752,49 +830,28 @@ async def admin_show_presence_days(query, week_string):
         logger.error(f"❌ Ошибка в admin_show_presence_days: {e}")
         await query.edit_message_text(f"❌ Ошибка при загрузке расписания: {str(e)}")
 
-async def admin_show_presence_week_selection(query):
-    """Показ выбора недели для управления наличием пар"""
+async def admin_show_presence_subgroups(query, week_string, day):
+    """Показ выбора подгруппы для управления наличием пар"""
     user_id = query.from_user.id
     if user_id != ADMIN_ID:
         await query.edit_message_text("❌ У вас нет доступа")
         return
     
-    try:
-        # Получаем информацию о неделях
-        current_week_info = get_week_info(0)
-        previous_week_info = get_week_info(-1)
-        
-        keyboard = []
-        
-        if current_week_info:
-            week_encoded = encode_week_string(current_week_info['string'])
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"📅 {current_week_info['string']}", 
-                    callback_data=f"apw_{week_encoded}"
-                )
-            ])
-        
-        if previous_week_info:
-            week_encoded = encode_week_string(previous_week_info['string'])
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"↩️ {previous_week_info['string']}", 
-                    callback_data=f"apw_{week_encoded}"
-                )
-            ])
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_class_presence")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "Выберите неделю для управления наличием пар:",
-            reply_markup=reply_markup
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка в admin_show_presence_week_selection: {e}")
-        await query.edit_message_text("❌ Ошибка при загрузке недель")
+    keyboard = [
+        [
+            InlineKeyboardButton("1 подгруппа", callback_data=f"apsg_{encode_week_string(week_string)}_{day}_1"),
+            InlineKeyboardButton("2 подгруппа", callback_data=f"apsg_{encode_week_string(week_string)}_{day}_2")
+        ],
+        [InlineKeyboardButton("🔙 Назад", callback_data=f"apw_{encode_week_string(week_string)}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"📅 {week_string}\n"
+        f"📅 {day}\n\n"
+        "Выберите подгруппу:",
+        reply_markup=reply_markup
+    )
 
 async def admin_show_presence_subjects(query, week_string, day, subgroup, context=None):
     """Показ предметов для управления отменой для конкретной подгруппы"""
@@ -874,86 +931,6 @@ async def admin_show_presence_subjects(query, week_string, day, subgroup, contex
     except Exception as e:
         logger.error(f"❌ Ошибка в admin_show_presence_subjects: {e}")
         await query.edit_message_text(f"❌ Ошибка при загрузке расписания: {str(e)}")
-
-async def admin_show_presence_subjects_new(query, week_string, day, subgroup, context):
-    """Показ предметов для управления отменой (новая версия с отправкой нового сообщения)"""
-    user_id = query.from_user.id
-    if user_id != ADMIN_ID:
-        await query.message.reply_text("❌ У вас нет доступа")
-        return
-    
-    logger.info(f"🔍 АДМИН: Загрузка предметов для {day} недели '{week_string}', подгруппа {subgroup}")
-
-    try:
-        # Получаем данные только для выбранной подгруппы
-        sheet = db.worksheet(f"{subgroup} подгруппа")
-        data = sheet.get_all_values()
-        
-        subjects_with_status = []
-        
-        # Проверяем временные изменения
-        temp_cancellations = {}
-        week_key = f"{week_string}_{day}_{subgroup}"
-        if context and 'temp_cancellations' in context.user_data and week_key in context.user_data['temp_cancellations']:
-            temp_cancellations = context.user_data['temp_cancellations'][week_key]
-        
-        # Обрабатываем выбранную подгруппу
-        for row_num, row in enumerate(data[1:], start=2):
-            table_week = ' '.join(str(row[0]).split()) if len(row) > 0 else ""
-            if len(row) > 2 and table_week == week_string and row[1] == day:
-                subject = row[2]
-                
-                # Проверяем статус - сначала временный, потом из таблицы
-                temp_status = temp_cancellations.get(str(row_num), None)
-                if temp_status is not None:
-                    is_cancelled = (temp_status == "cancel")
-                else:
-                    is_cancelled = any('⚙️' in str(cell) for cell in row[3:])
-                
-                # Эмодзи шестеренки ПЕРЕД названием пары
-                button_text = f"⚙️ {subject}" if is_cancelled else f"{subject}"
-                subjects_with_status.append((subject, button_text, row_num, subgroup, is_cancelled))
-        
-        if not subjects_with_status:
-            await query.message.reply_text(f"❌ На {day} ({week_string}) в {subgroup} подгруппе нет занятий")
-            return
-            
-        keyboard = []
-        for subject, button_text, row_num, subgroup, is_cancelled in subjects_with_status:
-            action = "uncancel" if is_cancelled else "cancel"
-            week_encoded = encode_week_string(week_string)
-            
-            # Создаем callback_data
-            callback_data = f"apst_{week_encoded}_{day}_{subgroup}_{row_num}_{action}"
-            
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-        
-        # Показываем количество временных изменений
-        temp_count = len(temp_cancellations)
-        save_button_text = f"💾 Сохранить ({temp_count})" if temp_count > 0 else "💾 Сохранить"
-        
-        keyboard.append([InlineKeyboardButton("———", callback_data="separator")])
-        keyboard.append([
-            InlineKeyboardButton("🔙 Назад", callback_data=f"apd_{week_encoded}_{day}"),
-            InlineKeyboardButton(save_button_text, callback_data=f"apss_{week_encoded}_{day}_{subgroup}")
-        ])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        status_text = "⚙️ - пара отменена (временное изменение)" if temp_count > 0 else "⚙️ - пара отменена"
-        
-        # Отправляем новое сообщение вместо редактирования
-        await query.message.reply_text(
-            f"📚 {day} - {week_string}:\n"
-            f"Подгруппа - {subgroup}\n\n"
-            f"Нажмите на предмет чтобы отменить/восстановить пару\n"
-            f"{status_text}",
-            reply_markup=reply_markup
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка в admin_show_presence_subjects: {e}")
-        await query.message.reply_text(f"❌ Ошибка при загрузке расписания: {str(e)}")
 
 async def admin_temp_toggle_class_cancellation(query, week_string, day, subgroup, row_num, action, context):
     """Временное изменение статуса пары (без сохранения в таблицу)"""
@@ -1063,20 +1040,16 @@ async def admin_save_class_cancellations(query, week_string, day, subgroup, cont
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 @log_execution_time("show_week_selection")
 async def show_week_selection(query, user_id):
-    """Показ выбора недели"""
+    """Показ выбора недели с статусами"""
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
         
     try:
         student_data = user_data[user_id]
-        subgroup = student_data['subgroup']
         username = query.from_user.username or "Без username"
         
         log_user_action(user_id, username, "Выбор недели для отметки")
-        
-        # Получаем данные расписания для проверки наличия недель
-        schedule_data = get_schedule_data_optimized(subgroup)
         
         # Получаем информацию о неделях
         current_week_info = get_week_info(0)  # Текущая неделя
@@ -1086,42 +1059,21 @@ async def show_week_selection(query, user_id):
         
         # Текущая неделя - всегда доступна
         if current_week_info:
+            week_status = get_week_status(user_id, current_week_info['string'])
             keyboard.append([
                 InlineKeyboardButton(
-                    f"📅 {current_week_info['string']}", 
+                    f"📅 {current_week_info['string']} {week_status}", 
                     callback_data=f"week_{current_week_info['string']}"
                 )
             ])
         
-        # Предыдущая неделя - проверяем наличие в расписании
+        # Предыдущая неделя
         if previous_week_info:
-            # Проверяем есть ли занятия на предыдущей неделе в расписании
-            week_has_classes = any(
-                len(row) > 2 and row[0] == previous_week_info['string'] 
-                for row in schedule_data[1:]  # Пропускаем заголовок
-            )
-            
-            if week_has_classes:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"↩️ {previous_week_info['string']}", 
-                        callback_data=f"week_{previous_week_info['string']}"
-                    )
-                ])
-            else:
-                # Если недели нет в расписании
-                keyboard.append([
-                    InlineKeyboardButton(
-                        "❌ Недели нет в расписании", 
-                        callback_data="week_none"
-                    )
-                ])
-        else:
-            # Если предыдущей недели не существует (например, первая неделя семестра)
+            week_status = get_week_status(user_id, previous_week_info['string'])
             keyboard.append([
                 InlineKeyboardButton(
-                    "❌ Недели нет", 
-                    callback_data="week_none"
+                    f"↩️ {previous_week_info['string']} {week_status}", 
+                    callback_data=f"week_{previous_week_info['string']}"
                 )
             ])
         
@@ -1130,7 +1082,11 @@ async def show_week_selection(query, user_id):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "Выберите неделю для отметки посещаемости:",
+            "Выберите неделю для отметки посещаемости:\n\n"
+            "✅ - все пары недели отмечены\n"
+            "🟡 - часть пар недели отмечена\n" 
+            "❌ - пары недели не отмечены\n"
+            "⚫ - нет пар на неделе",
             reply_markup=reply_markup
         )
         
@@ -1155,7 +1111,7 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
         week_type = get_current_week_type()
     
     try:
-        # 🔄 ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ ДАННЫЕ ДЛЯ АКТУАЛЬНОСТИ
+        # Используем кэшированные данные
         schedule_data = get_schedule_data_optimized(subgroup)
         
         day_status = {}
@@ -1200,6 +1156,7 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="mark_attendance")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
+        
         try:
             await query.edit_message_text(
                 f"📅 Выберите день недели ({week_type}):\n\n"
@@ -1213,6 +1170,7 @@ async def show_days_with_status(query, user_id, week_string=None, context=None):
                 logger.info(f"Сообщение не изменилось (неделя: {week_type}), пропускаем")
             else:
                 raise e
+                
     except Exception as e:
         logger.error(f"❌ Ошибка в show_days_with_status: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке расписания")
@@ -1536,15 +1494,14 @@ def encode_week_string(week_string):
     """Кодирование строки недели в короткий формат"""
     # Простой хэш для создания короткого идентификатора
     week_hash = hash(week_string) % 1000000
-    week_strings_cache[week_string] = week_hash
+    week_strings_cache[str(week_hash)] = week_string
     return str(week_hash)
 
 def decode_week_string(encoded_week):
     """Декодирование строки недели из короткого формата"""
     # Ищем в кэше
-    for week_str, week_hash in week_strings_cache.items():
-        if str(week_hash) == encoded_week:
-            return week_str
+    if encoded_week in week_strings_cache:
+        return week_strings_cache[encoded_week]
     
     # Если не найдено, возвращаем текущую неделю как fallback
     return get_current_week_type()
@@ -1566,7 +1523,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Проверка  RATE LIMIT
+        # Проверка RATE LIMIT
         if user_id != ADMIN_ID:
             try:
                 if not await button_limiter.is_allowed(user_id):
@@ -1609,6 +1566,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
                     [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
                     [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+                    [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1632,7 +1590,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     preload_frequent_data()
                     await query.answer("✅ Кэш обновлен", show_alert=True)
-                    await admin_panel(update, context)  # Возвращаем в админ-панель
+                    # Возвращаем в админ-панель
+                    keyboard = [
+                        [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
+                        [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
+                        [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+                        [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
+                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.edit_message_text("🛠️ Админ-панель:", reply_markup=reply_markup)
                 except Exception as e:
                     await query.answer(f"❌ Ошибка: {str(e)[:50]}", show_alert=True)
             else:
@@ -1641,12 +1608,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             week_encoded = data[4:]
             try:
                 # Ищем неделю в кэше
-                week_string = None
-                for week_str, week_hash in week_strings_cache.items():
-                    if str(week_hash) == week_encoded:
-                        week_string = week_str
-                        break
-        
+                week_string = decode_week_string(week_encoded)
                 if week_string:
                     await admin_show_presence_days(query, week_string)
                 else:
@@ -1661,11 +1623,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 day = '_'.join(parts[2:])
         
                 # Ищем неделю в кэше
-                week_string = None
-                for week_str, week_hash in week_strings_cache.items():
-                    if str(week_hash) == week_encoded:
-                        week_string = week_str
-                        break
+                week_string = decode_week_string(week_encoded)
         
                 if week_string:
                     logger.info(f"🔍 АДМИН: Переход к выбору подгруппы дня {day} недели '{week_string}'")
@@ -1681,11 +1639,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 subgroup = parts[-1]
         
                 # Ищем неделю в кэше
-                week_string = None
-                for week_str, week_hash in week_strings_cache.items():
-                    if str(week_hash) == week_encoded:
-                        week_string = week_str
-                        break
+                week_string = decode_week_string(week_encoded)
         
                 if week_string:
                     logger.info(f"🔍 АДМИН: Переход к предметам {day} недели '{week_string}', подгруппа {subgroup}")
@@ -1704,11 +1658,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 action = parts[-1]
         
                 # Ищем неделю в кэше
-                week_string = None
-                for week_str, week_hash in week_strings_cache.items():
-                    if str(week_hash) == week_encoded:
-                        week_string = week_str
-                        break
+                week_string = decode_week_string(week_encoded)
         
                 if week_string:
                     logger.info(f"🔍 АДМИН: Временное изменение статуса пары {day} недели '{week_string}', подгруппа {subgroup}")
@@ -1725,11 +1675,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 subgroup = parts[-1]
         
                 # Ищем неделю в кэше
-                week_string = None
-                for week_str, week_hash in week_strings_cache.items():
-                    if str(week_hash) == week_encoded:
-                        week_string = week_str
-                        break
+                week_string = decode_week_string(week_encoded)
         
                 if week_string:
                     logger.info(f"🔍 АДМИН: Сохранение изменений для {day} недели '{week_string}', подгруппа {subgroup}")
