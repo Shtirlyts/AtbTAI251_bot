@@ -188,18 +188,95 @@ def connect_google_sheets():
 db = None
 user_data = {}
 user_states = {}
-week_strings_cache = {}
+
+# Кеш
+cache = {
+    'week_strings': {},
+    'blacklist': [],
+    'admins': [],
+}
 
 # Предзагруженные данные для ускорения
 preloaded_data = {
     'students': None,
     'schedule_1': None,
     'schedule_2': None,
+    'blacklist': None,
     'last_loaded': 0
 }
 
+def is_user_blacklisted(user_id):
+    """Проверка, находится ли пользователь в черном списке"""
+    try:
+        # Админа никогда не блокируем
+        if user_id == ADMIN_ID:
+            return False
+            
+        # Используем кэшированные данные
+        blacklist = cache['blacklist']
+        if not blacklist:
+            return False
+            
+        # Проверяем ID в черном списке
+        user_id_str = str(user_id).strip()
+        for blacklisted_id in blacklist:
+            if str(blacklisted_id).strip() == user_id_str:
+                return True
+                
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки черного списка: {e}")
+        # В случае ошибки разрешаем доступ (безопаснее)
+        return False
+
+@retry_google_operation(max_attempts=3, delay=2)
+def get_blacklist_data(force_refresh=False):
+    """Получение данных черного списка с кэшированием"""
+    # Если force_refresh=True, игнорируем кэш
+    if not force_refresh and (preloaded_data.get('blacklist') is not None and 
+        time.time() - preloaded_data['last_loaded'] < 300):
+        return preloaded_data['blacklist']
+    
+    try:
+        logger.info("📋 Загрузка черного списка из Google Sheets")
+        blacklist_sheet = db.worksheet("Черный список")
+        data = blacklist_sheet.col_values(1)  # Получаем только первую колонку
+        
+        # Пропускаем заголовок (A1) и берем данные с A2, фильтруем пустые значения
+        blacklist_ids = []
+        if len(data) > 1:
+            blacklist_ids = [id_str.strip() for id_str in data[1:] if id_str.strip()]
+            
+        preloaded_data['blacklist'] = blacklist_ids
+        preloaded_data['last_loaded'] = time.time()
+        
+        logger.info(f"✅ Загружено {len(blacklist_ids)} ID в черном списке")
+        return blacklist_ids
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки черного списка: {e}")
+        # Возвращаем старые данные или пустой список
+        return preloaded_data.get('blacklist', [])
+
+def check_blacklist(func):
+    """Декоратор для проверки черного списка перед выполнением функции"""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        username = update.effective_user.username or "Без username"
+        
+        # Проверяем черный список
+        if is_user_blacklisted(user_id):
+            log_user_action(user_id, username, "ПОПЫТКА ДОСТУПА ИЗ ЧЕРНОГО СПИСКА", "блокировка", "warning")
+            # Не отправляем сообщение - просто игнорируем
+            return
+            
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
 def preload_frequent_data():
-    """Предзагрузка часто используемых данных"""
+    """Предзагрузка часто используемых данных включая черный список"""
     try:
         logger.info("🔄 Предзагрузка частых данных...")
         send_log_to_server("🔄 Предзагрузка частых данных...", "preload", "info")
@@ -207,7 +284,11 @@ def preload_frequent_data():
         preloaded_data['students'] = get_students_data_optimized()
         preloaded_data['schedule_1'] = get_schedule_data_optimized(1)
         preloaded_data['schedule_2'] = get_schedule_data_optimized(2)
+        preloaded_data['blacklist'] = get_blacklist_data()
         preloaded_data['last_loaded'] = time.time()
+        
+        # ОБНОВЛЯЕМ ЕДИНЫЙ КЕШ
+        cache['blacklist'] = preloaded_data['blacklist']
         
         logger.info("✅ Предзагрузка завершена")
         send_log_to_server("✅ Предзагрузка завершена", "preload", "info")
@@ -216,12 +297,14 @@ def preload_frequent_data():
         students_count = len(preloaded_data['students']) if preloaded_data['students'] else 0
         schedule1_count = len(preloaded_data['schedule_1']) if preloaded_data['schedule_1'] else 0
         schedule2_count = len(preloaded_data['schedule_2']) if preloaded_data['schedule_2'] else 0
+        blacklist_count = len(preloaded_data['blacklist']) if preloaded_data['blacklist'] else 0
         
         logger.info(f"📊 Загружено: {students_count} студентов, "
                    f"{schedule1_count} строк расписания 1, "
-                   f"{schedule2_count} строк расписания 2")
+                   f"{schedule2_count} строк расписания 2, "
+                   f"{blacklist_count} ID в черном списке")
                    
-        send_log_to_server(f"📊 Загружено: {students_count} студентов, {schedule1_count} строк расписания 1, {schedule2_count} строк расписания 2", "preload_stats", "info")
+        send_log_to_server(f"📊 Загружено: {students_count} студентов, {schedule1_count} строк расписания 1, {schedule2_count} строк расписания 2, {blacklist_count} ID в черном списке", "preload_stats", "info")
                    
     except Exception as e:
         logger.error(f"❌ Ошибка предзагрузки: {e}")
@@ -300,6 +383,52 @@ def get_week_status(user_id, week_string):
     except Exception as e:
         logger.error(f"❌ Ошибка в get_week_status: {e}")
         return '❓'
+
+def update_cache():
+    """Обновление всего кеша"""
+    try:
+        logger.info("🔄 Начало обновления кеша...")
+        
+        # Обновляем черный список с принудительным обновлением
+        old_blacklist_count = len(cache['blacklist'])
+        new_blacklist = get_blacklist_data(force_refresh=True)  # ← ДОБАВИЛ force_refresh=True
+        cache['blacklist'] = new_blacklist
+        new_blacklist_count = len(new_blacklist)
+        
+        # Обновляем week_strings (очищаем старые данные)
+        old_week_strings_count = len(cache['week_strings'])
+        cache['week_strings'] = {}
+        
+        # Получаем актуальные данные для логирования
+        students_data = get_students_data_optimized()
+        schedule_1_data = get_schedule_data_optimized(1)
+        schedule_2_data = get_schedule_data_optimized(2)
+        
+        students_count = len(students_data) if students_data else 0
+        schedule1_count = len(schedule_1_data) if schedule_1_data else 0
+        schedule2_count = len(schedule_2_data) if schedule_2_data else 0
+        
+        logger.info("🔄 Кеш успешно обновлен")
+        logger.info(f"📊 Загружено: {students_count} студентов, "
+                   f"{schedule1_count} строк расписания 1, "
+                   f"{schedule2_count} строк расписания 2, "
+                   f"{new_blacklist_count} ID в черном списке")
+        
+        # Логируем изменения
+        if old_blacklist_count != new_blacklist_count:
+            logger.info(f"📈 Изменения в черном списке: было {old_blacklist_count}, стало {new_blacklist_count}")
+        
+        send_log_to_server(
+            f"🔄 Кеш обновлен: {students_count} студентов, {schedule1_count} строк расписания 1, {schedule2_count} строк расписания 2, {new_blacklist_count} ID в черном списке", 
+            "cache_update", 
+            "info"
+        )
+        
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления кеша: {e}")
+        send_log_to_server(f"❌ Ошибка обновления кеша: {e}", "cache_error", "error")
+        return False
 
 # RATE LIMITER 
 class SmartRateLimiter:
@@ -381,6 +510,27 @@ async def background_cleanup():
         logger.info("🧹 Очистка старых записей rate limiter")
         send_log_to_server("🧹 Очистка старых записей rate limiter", "cleanup", "info")
 
+async def background_blacklist_update():
+    """Фоновая задача для периодического обновления черного списка"""
+    while True:
+        await asyncio.sleep(300)  # Обновляем каждые 5 минут
+        try:
+            old_count = len(cache['blacklist'])
+
+            new_blacklist = get_blacklist_data()
+            
+            cache['blacklist'] = new_blacklist
+            preloaded_data['blacklist'] = new_blacklist
+            new_count = len(new_blacklist)
+            
+            if old_count != new_count:
+                logger.info(f"🔄 Черный список обновлен: было {old_count}, стало {new_count} записей")
+                send_log_to_server(f"🔄 Черный список обновлен: {old_count} → {new_count} записей", "blacklist_update", "info")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления черного списка: {e}")
+
+@check_blacklist
 @log_execution_time("start")
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -429,6 +579,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         send_log_to_server(error_msg, "error", "error")
         await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
 
+@check_blacklist
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Без username"
@@ -440,6 +591,7 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
         log_user_action(user_id, username, "НЕЗАРЕГИСТРИРОВАННОЕ СООБЩЕНИЕ", text, "warning")
         await update.message.reply_text("Сначала отправьте /start для регистрации")
 
+@check_blacklist
 @log_execution_time("handle_fio")
 async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db is None:
@@ -508,6 +660,7 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Произошла ошибка при регистрации. Попробуйте позже.")
 
 # АДМИН-ФУНКЦИИ
+@check_blacklist
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Без username"
@@ -523,6 +676,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
         [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
         [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+        [InlineKeyboardButton("⚫ Черный список", callback_data="admin_blacklist")],
         [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
@@ -960,6 +1114,155 @@ async def admin_temp_toggle_class_cancellation(query, week_string, day, subgroup
     except Exception as e:
         logger.error(f"❌ Ошибка в admin_temp_toggle_class_cancellation: {e}")
         await query.answer("❌ Ошибка при изменении статуса пары", show_alert=True)
+
+async def admin_blacklist_menu(query):
+    """Меню управления черным списком"""
+    user_id = query.from_user.id
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ У вас нет доступа")
+        return
+    
+    log_user_action(user_id, query.from_user.username or "Без username", "Открытие меню черного списка")
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 Показать черный список", callback_data="admin_show_blacklist")],
+        [InlineKeyboardButton("🔄 Обновить список", callback_data="admin_refresh_blacklist")],
+        [InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("⚫ Управление черным списком:", reply_markup=reply_markup)
+
+async def admin_show_blacklist(query):
+    """Показать черный список с username"""
+    user_id = query.from_user.id
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ У вас нет доступа")
+        return
+    
+    log_user_action(user_id, query.from_user.username or "Без username", "Просмотр черного списка")
+    
+    try:
+        blacklist = cache['blacklist']
+        
+        if not blacklist:
+            await query.edit_message_text("📝 Черный список пуст")
+            return
+        
+        await query.edit_message_text("🔄 Получаю информацию о пользователях...")
+        
+        message = "🚫 Заблокированные пользователи:\n\n"
+        valid_users = 0
+        failed_users = 0
+        
+        for i, user_id_str in enumerate(blacklist, 1):
+            try:
+                user_id_int = int(user_id_str.strip())
+                
+                # Пытаемся получить информацию о пользователе через бота
+                try:
+                    user = await query.bot.get_chat(user_id_int)
+                    username = f"@{user.username}" if user.username else "нет username"
+                    first_name = f" {user.first_name}" if user.first_name else ""
+                    last_name = f" {user.last_name}" if user.last_name else ""
+                    
+                    message += f"{i}. {username}{first_name}{last_name} - ID: {user_id_str}\n"
+                    valid_users += 1
+                    
+                except Exception as user_error:
+                    # Если не получается через бота, пробуем альтернативные методы
+                    message += f"{i}. ID: {user_id_str} (информация недоступна)\n"
+                    failed_users += 1
+                
+                # Делаем небольшую задержку чтобы не превысить лимиты Telegram
+                if i % 3 == 0:
+                    await asyncio.sleep(0.5)
+                    
+            except Exception as e:
+                # Если не получается обработать ID - показываем как есть
+                message += f"{i}. ID: {user_id_str} (ошибка обработки)\n"
+                failed_users += 1
+        
+        # Добавляем статистику
+        message += f"\n📊 Статистика:\n"
+        message += f"• Успешно: {valid_users} пользователей\n"
+        message += f"• Недоступно: {failed_users} пользователей\n"
+        message += f"• Всего: {len(blacklist)} записей"
+        
+        # Добавляем пояснение
+        message += f"\n\n💡 Примечание: Информация может быть недоступна если:\n"
+        message += f"• Пользователь никогда не писал боту\n"
+        message += f"• Пользователь заблокировал бота\n"
+        message += f"• Пользователь удалил аккаунт"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить список", callback_data="admin_refresh_blacklist")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="admin_blacklist")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при показе черного списка: {e}")
+        await query.edit_message_text(f"❌ Ошибка при загрузке черного списка: {str(e)}")
+
+async def admin_refresh_blacklist(query):
+    """Обновить черный список"""
+    user_id = query.from_user.id
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ У вас нет доступа")
+        return
+    
+    log_user_action(user_id, query.from_user.username or "Без username", "Обновление черного списка")
+    
+    try:
+        await query.edit_message_text("🔄 Обновляю черный список...")
+        
+        # ПРИНУДИТЕЛЬНО обновляем черный список с флагом force_refresh
+        old_count = len(cache['blacklist'])
+        
+        # Очищаем кэш чтобы гарантировать обновление
+        preloaded_data['blacklist'] = None
+        preloaded_data['last_loaded'] = 0
+        
+        # Загружаем заново
+        new_blacklist = get_blacklist_data(force_refresh=True)
+        cache['blacklist'] = new_blacklist
+        new_count = len(new_blacklist)
+        
+        logger.info(f"✅ Черный список обновлен: было {old_count}, стало {new_count}")
+        
+        keyboard = [
+            [InlineKeyboardButton("📋 Показать черный список", callback_data="admin_show_blacklist")],
+            [InlineKeyboardButton("🔄 Обновить список", callback_data="admin_refresh_blacklist")],
+            [InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if old_count != new_count:
+            message = f"✅ Черный список обновлен!\n\n📊 Было: {old_count} пользователей\n📊 Стало: {new_count} пользователей"
+        else:
+            message = f"✅ Черный список обновлен!\n\n📊 Количество пользователей не изменилось: {new_count}"
+        
+        await query.edit_message_text(message, reply_markup=reply_markup)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при обновлении черного списка: {e}")
+        await query.edit_message_text(f"❌ Ошибка при обновлении черного списка: {str(e)}")
+
+async def admin_refresh_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для обновления кеша (только для админа)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    
+    message = await update.message.reply_text("🔄 Обновляю кеш...")
+    
+    if update_cache():
+        await message.edit_text("✅ Кеш успешно обновлен!")
+    else:
+        await message.edit_text("❌ Ошибка при обновлении кеша")
 
 async def admin_save_class_cancellations(query, week_string, day, subgroup, context):
     """Сохранение всех временных изменений статуса пар"""
@@ -1494,19 +1797,20 @@ def encode_week_string(week_string):
     """Кодирование строки недели в короткий формат"""
     # Простой хэш для создания короткого идентификатора
     week_hash = hash(week_string) % 1000000
-    week_strings_cache[str(week_hash)] = week_string
+    cache['week_strings'][str(week_hash)] = week_string
     return str(week_hash)
 
 def decode_week_string(encoded_week):
     """Декодирование строки недели из короткого формата"""
     # Ищем в кэше
-    if encoded_week in week_strings_cache:
-        return week_strings_cache[encoded_week]
+    if encoded_week in cache['week_strings']:
+        return cache['week_strings'][encoded_week]
     
     # Если не найдено, возвращаем текущую неделю как fallback
     return get_current_week_type()
 
 # ГЛАВНЫЙ ОБРАБОТЧИК КНОПОК
+@check_blacklist
 @log_execution_time("button_handler")
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1566,6 +1870,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
                     [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
                     [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+                    [InlineKeyboardButton("⚫ Черный список", callback_data="admin_blacklist")],
                     [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
                 ]
@@ -1584,22 +1889,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_class_presence(query)
         elif data == "admin_presence_week":
             await admin_show_presence_week_selection(query)
+        elif data == "admin_blacklist":
+            await admin_blacklist_menu(query)
+        elif data == "admin_show_blacklist":
+            await admin_show_blacklist(query)
+        elif data == "admin_refresh_blacklist":
+            await admin_refresh_blacklist(query)
         elif data == "admin_refresh_cache":
             if user_id == ADMIN_ID:
                 await query.edit_message_text("🔄 Обновление кэша...")
                 try:
-                    preload_frequent_data()
-                    await query.answer("✅ Кэш обновлен", show_alert=True)
-                    # Возвращаем в админ-панель
-                    keyboard = [
-                        [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
-                        [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
-                        [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
-                        [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
-                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await query.edit_message_text("🛠️ Админ-панель:", reply_markup=reply_markup)
+                    # Сохраняем текущее сообщение
+                    original_message = query.message.text
+
+                    if update_cache():
+                        # Показываем уведомление об успехе
+                        await query.answer("✅ Кеш обновлен", show_alert=True)
+
+                        # Возвращаем в админ-панель с обновленным сообщением
+                        keyboard = [
+                            [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
+                            [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
+                            [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+                            [InlineKeyboardButton("⚫ Черный список", callback_data="admin_blacklist")],
+                            [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
+                            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                        ]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await query.edit_message_text("🛠️ Админ-панель (кеш обновлен ✅):", reply_markup=reply_markup)
+                    else:
+                        await query.answer("❌ Ошибка обновления кеша", show_alert=True)
+                        # Возвращаем в админ-панель даже при ошибке
+                        keyboard = [
+                            [InlineKeyboardButton("👥 Список студентов", callback_data="admin_students")],
+                            [InlineKeyboardButton("🖥️ Статус сервера", callback_data="admin_status")],
+                            [InlineKeyboardButton("📊 Наличие пар", callback_data="admin_class_presence")],
+                            [InlineKeyboardButton("⚫ Черный список", callback_data="admin_blacklist")],
+                            [InlineKeyboardButton("🔄 Обновить кэш", callback_data="admin_refresh_cache")],
+                            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+                        ]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await query.edit_message_text("🛠️ Админ-панель (ошибка обновления кеша ❌):", reply_markup=reply_markup)
+                
                 except Exception as e:
                     await query.answer(f"❌ Ошибка: {str(e)[:50]}", show_alert=True)
             else:
@@ -1759,6 +2090,7 @@ def main():
 
         application.add_handler(CommandHandler("start", start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
+        application.add_handler(CommandHandler("update_cache", admin_refresh_cache_command))
         application.add_handler(CallbackQueryHandler(button_handler))
 
         logger.info("🤖 Бот запускается...")
@@ -1766,6 +2098,7 @@ def main():
         # Запускаем фоновые задачи
         loop = asyncio.get_event_loop()
         loop.create_task(background_cleanup())
+        loop.create_task(background_blacklist_update())
         
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
