@@ -1412,7 +1412,17 @@ def load_notification_settings():
         if os.path.exists('notifications.json'):
             with open('notifications.json', 'r', encoding='utf-8') as f:
                 user_notifications = json.load(f)
-            logger.info(f"✅ Настройки уведомлений загружены: {len(user_notifications)} пользователей")
+            
+            # СИНХРОНИЗАЦИЯ: гарантируем правильную структуру для всех пользователей
+            for user_id_str, settings in user_notifications.items():
+                if 'enabled' not in settings:
+                    settings['enabled'] = False
+                if 'days' not in settings:
+                    settings['days'] = []
+                if 'time' not in settings:
+                    settings['time'] = '09:00'
+            
+            logger.info(f"✅ Настройки уведомлений загружены и синхронизированы: {len(user_notifications)} пользователей")
         else:
             user_notifications = {}
             logger.info("📝 Файл настроек уведомлений не найден, создан новый")
@@ -1425,10 +1435,6 @@ async def show_settings(query, user_id):
     if user_id not in user_data:
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
-    
-    # ЛОГИРОВАНИЕ открытия настроек
-    username = query.from_user.username or "Без username"
-    log_user_action(user_id, username, "Открытие меню настроек")
     
     # Получаем текущие настройки пользователя
     user_settings = user_notifications.get(str(user_id), {
@@ -1479,7 +1485,6 @@ async def show_days_selection(query, user_id):
         emoji = "✅" if day in selected_days else "⚪"
         keyboard.append([InlineKeyboardButton(f"{emoji} {day}", callback_data=f"notif_day_{day}")])
     
-    keyboard.append([InlineKeyboardButton("💾 Сохранить", callback_data="save_days")])
     keyboard.append([InlineKeyboardButton("🔙 Назад к настройкам", callback_data="settings_menu")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2224,17 +2229,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Эта неделя недоступна для управления наличием пар", show_alert=True)
             return
         elif data == "settings_menu":
-            log_user_action(user_id, username, "Открытие настроек из главного меню")
             await show_settings(query, user_id)
         elif data == "toggle_notifications":
             # Включение/выключение уведомлений
+            username = query.from_user.username or "Без username"
             user_id_str = str(user_id)
+    
+            # Инициализируем настройки если их нет
             if user_id_str not in user_notifications:
-                user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
-            else:
-                user_notifications[user_id_str]['enabled'] = not user_notifications[user_id_str].get('enabled', False)
-
+                user_notifications[user_id_str] = {'enabled': False, 'days': [], 'time': '09:00'}
+    
+            # Получаем ТЕКУЩИЙ статус
+            current_status = user_notifications[user_id_str].get('enabled', False)
+    
+            # Инвертируем статус
+            new_status = not current_status
+            user_notifications[user_id_str]['enabled'] = new_status
+    
+            # ЛОГИРОВАНИЕ
+            status_text = "включены" if new_status else "выключены"
+            log_user_action(user_id, username, f"Уведомления {status_text}")
+    
+            # Сохраняем настройки
             save_notification_settings()
+    
+            # Показываем обновленные настройки
             await show_settings(query, user_id)
         elif data == "select_days":
             await show_days_selection(query, user_id)
@@ -2242,31 +2261,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_time_selection(query, user_id)
         elif data.startswith("notif_day_"):
             day = data[10:]  # Извлекаем название дня
+            username = query.from_user.username or "Без username"
+
+            # Логируем перед изменением
+            old_days = user_notifications.get(str(user_id), {}).get('days', [])
+
+            # Изменяем настройки
             user_id_str = str(user_id)
-            
             if user_id_str not in user_notifications:
                 user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
+
             if day in user_notifications[user_id_str]['days']:
                 user_notifications[user_id_str]['days'].remove(day)
+                action = "удален"
             else:
                 user_notifications[user_id_str]['days'].append(day)
+                action = "добавлен"
 
+            # Логируем после изменения
+            new_days = user_notifications[user_id_str]['days']
+            log_user_action(user_id, username, f"Изменение дней уведомлений", 
+                           f"день: {day} ({action}), теперь: {', '.join(new_days) if new_days else 'нет дней'}")
+    
             save_notification_settings()
             await show_days_selection(query, user_id)
         elif data.startswith("notif_time_"):
             time_str = data[11:]  # Извлекаем время
-            user_id_str = str(user_id)
+            username = query.from_user.username or "Без username"
     
+            # Логируем перед изменением
+            old_time = user_notifications.get(str(user_id), {}).get('time', 'не установлено')
+    
+            # Изменяем настройки
+            user_id_str = str(user_id)
             if user_id_str not in user_notifications:
                 user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': time_str}
             else:
                 user_notifications[user_id_str]['time'] = time_str
-            save_notification_settings()\
-                
-            await show_settings(query, user_id)
-        elif data == "save_days":
-            await show_settings(query, user_id)
-            
+    
+            # Логируем после изменения
+            log_user_action(user_id, username, "Изменение времени уведомлений", f"новое время: {time_str}")
+    
+            save_notification_settings()
+            await show_settings(query, user_id) 
         elif data == "admin_students":
             await admin_show_students(query)
         elif data == "admin_status":
