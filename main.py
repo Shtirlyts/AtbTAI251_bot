@@ -648,7 +648,11 @@ async def handle_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         log_user_action(user_id, username, "Регистрация успешна", f"№{student_number}, подгруппа {subgroup}")
         send_log_to_server(f"✅ Регистрация: {user_id} -> {fio}", "registration")
-        keyboard = [[InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")]]
+        keyboard = [
+            [InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")],
+            [InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")]
+        ]
+        
         if user_id == ADMIN_ID:
             keyboard.append([InlineKeyboardButton("🛠️ Админ-панель", callback_data="admin_panel")])
         
