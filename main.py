@@ -188,6 +188,7 @@ def connect_google_sheets():
 db = None
 user_data = {}
 user_states = {}
+user_notifications = {}
 
 # Кеш
 cache = {
@@ -560,7 +561,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[user_id] = "registered"
             log_user_action(user_id, username, "Автоматический вход", f"ФИО: {student_data['fio']}")
             
-            keyboard = [[InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")]]
+            # ОБНОВЛЕННОЕ ГЛАВНОЕ МЕНЮ
+            keyboard = [
+                [InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")],
+                [InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")]  # ДОБАВЛЕНА КНОПКА НАСТРОЕК
+            ]
             if user_id == ADMIN_ID:
                 keyboard.append([InlineKeyboardButton("🛠️ Админ-панель", callback_data="admin_panel")])
             
@@ -1133,7 +1138,7 @@ async def admin_blacklist_menu(query):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("⚫ Управление черным списком:", reply_markup=reply_markup)
 
-async def admin_show_blacklist(query):
+async def admin_show_blacklist(query, context: ContextTypes.DEFAULT_TYPE):
     """Показать черный список с username"""
     user_id = query.from_user.id
     if user_id != ADMIN_ID:
@@ -1161,18 +1166,29 @@ async def admin_show_blacklist(query):
                 
                 # Пытаемся получить информацию о пользователе через бота
                 try:
-                    user = await query.bot.get_chat(user_id_int)
+                    logger.info(f"🔍 Пытаюсь получить данные пользователя {user_id_int} через bot.get_chat()")
+                    user = await context.bot.get_chat(user_id_int)  # ← ИСПРАВЛЕНО: context.bot вместо query.bot
                     username = f"@{user.username}" if user.username else "нет username"
                     first_name = f" {user.first_name}" if user.first_name else ""
                     last_name = f" {user.last_name}" if user.last_name else ""
                     
                     message += f"{i}. {username}{first_name}{last_name} - ID: {user_id_str}\n"
                     valid_users += 1
+                    logger.info(f"✅ Успешно получены данные для {user_id_int}: {username}")
                     
                 except Exception as user_error:
-                    # Если не получается через бота, пробуем альтернативные методы
-                    message += f"{i}. ID: {user_id_str} (информация недоступна)\n"
-                    failed_users += 1
+                    # Логируем конкретную ошибку
+                    logger.error(f"❌ Ошибка получения данных для {user_id_int}: {user_error}")
+                    
+                    # Проверяем, есть ли пользователь в user_data (зарегистрированные)
+                    if user_id_int in user_data:
+                        student_info = user_data[user_id_int]
+                        message += f"{i}. {student_info['fio']} (зарегистрирован) - ID: {user_id_str}\n"
+                        valid_users += 1
+                        logger.info(f"📝 Использованы данные из user_data для {user_id_int}")
+                    else:
+                        message += f"{i}. ID: {user_id_str} (информация недоступна)\n"
+                        failed_users += 1
                 
                 # Делаем небольшую задержку чтобы не превысить лимиты Telegram
                 if i % 3 == 0:
@@ -1180,6 +1196,7 @@ async def admin_show_blacklist(query):
                     
             except Exception as e:
                 # Если не получается обработать ID - показываем как есть
+                logger.error(f"💥 Критическая ошибка обработки ID {user_id_str}: {e}")
                 message += f"{i}. ID: {user_id_str} (ошибка обработки)\n"
                 failed_users += 1
         
@@ -1190,10 +1207,10 @@ async def admin_show_blacklist(query):
         message += f"• Всего: {len(blacklist)} записей"
         
         # Добавляем пояснение
-        message += f"\n\n💡 Примечание: Информация может быть недоступна если:\n"
-        message += f"• Пользователь никогда не писал боту\n"
-        message += f"• Пользователь заблокировал бота\n"
-        message += f"• Пользователь удалил аккаунт"
+        message += f"\n\n💡 Примечание:\n"
+        message += f"• 'Успешно' - данные получены от Telegram\n"
+        message += f"• 'Из кэша' - данные из внутреннего кэша бота\n"
+        message += f"• 'Недоступно' - нет данных даже в кэше"
         
         keyboard = [
             [InlineKeyboardButton("🔄 Обновить список", callback_data="admin_refresh_blacklist")],
@@ -1207,7 +1224,41 @@ async def admin_show_blacklist(query):
         logger.error(f"❌ Ошибка при показе черного списка: {e}")
         await query.edit_message_text(f"❌ Ошибка при загрузке черного списка: {str(e)}")
 
-async def admin_refresh_blacklist(query):
+async def debug_user_info(query, target_user_id=None):
+    """Функция для отладки получения информации о пользователе"""
+    if target_user_id is None:
+        target_user_id = 1577485900  # ID Temmik1 для тестирования
+    
+    try:
+        logger.info(f"🔍 ОТЛАДКА: Начинаем отладку для пользователя {target_user_id}")
+        
+        # Метод 1: get_chat
+        try:
+            user = await query.bot.get_chat(target_user_id)
+            logger.info(f"✅ get_chat УСПЕХ: {user.username if user.username else 'no username'}")
+        except Exception as e1:
+            logger.error(f"❌ get_chat ОШИБКА: {e1}")
+        
+        # Метод 2: get_chat_member
+        try:
+            chat_member = await query.bot.get_chat_member(target_user_id, target_user_id)
+            user = chat_member.user
+            logger.info(f"✅ get_chat_member УСПЕХ: {user.username if user.username else 'no username'}")
+        except Exception as e2:
+            logger.error(f"❌ get_chat_member ОШИБКА: {e2}")
+        
+        # Метод 3: Проверка в user_data
+        if target_user_id in user_data:
+            logger.info(f"📝 user_data НАЙДЕН: {user_data[target_user_id]}")
+        else:
+            logger.info(f"📝 user_data НЕ НАЙДЕН")
+            
+        logger.info("🔍 ОТЛАДКА: Завершена")
+        
+    except Exception as e:
+        logger.error(f"💥 Ошибка в debug_user_info: {e}")
+
+async def admin_refresh_blacklist(query, context: ContextTypes.DEFAULT_TYPE):
     """Обновить черный список"""
     user_id = query.from_user.id
     if user_id != ADMIN_ID:
@@ -1339,6 +1390,259 @@ async def admin_save_class_cancellations(query, week_string, day, subgroup, cont
             await admin_show_presence_subjects(query, week_string, day, subgroup, context)
         except:
             await query.edit_message_text(f"❌ Ошибка при сохранении изменений: {str(e)}")
+
+#Пользовательские настройки
+def save_notification_settings():
+    """Простое сохранение настроек уведомлений в файл"""
+    try:
+        with open('notifications.json', 'w', encoding='utf-8') as f:
+            json.dump(user_notifications, f, ensure_ascii=False, indent=2)
+        logger.info("✅ Настройки уведомлений сохранены")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения настроек уведомлений: {e}")
+
+def load_notification_settings():
+    """Простая загрузка настроек уведомлений из файла"""
+    global user_notifications
+    try:
+        if os.path.exists('notifications.json'):
+            with open('notifications.json', 'r', encoding='utf-8') as f:
+                user_notifications = json.load(f)
+            logger.info(f"✅ Настройки уведомлений загружены: {len(user_notifications)} пользователей")
+        else:
+            user_notifications = {}
+            logger.info("📝 Файл настроек уведомлений не найден, создан новый")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки настроек уведомлений: {e}")
+        user_notifications = {}
+
+async def show_settings(query, user_id):
+    """Показывает меню настроек с обновленной информацией"""
+    if user_id not in user_data:
+        await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
+        return
+    
+    # Получаем текущие настройки пользователя
+    user_settings = user_notifications.get(str(user_id), {
+        'enabled': False,
+        'days': [],
+        'time': '09:00'
+    })
+    
+    status_emoji = "🔔" if user_settings['enabled'] else "🔕"
+    days_text = ", ".join(user_settings['days']) if user_settings['days'] else "не выбраны"
+    time_text = user_settings['time']
+    
+    message = (
+        f"⚙️ *Настройки уведомлений*\n\n"
+        f"• Статус: {status_emoji} {'Включены' if user_settings['enabled'] else 'Выключены'}\n"
+        f"• Дни напоминаний: {days_text}\n"
+        f"• Время напоминания: {time_text}\n\n"
+        f"*Доступные дни:* Пн-Вс (7 дней)\n"
+        f"*Доступное время:* 00:00-23:00 (целые часы)\n\n"
+        f"Выберите действие:"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{status_emoji} Вкл/Выкл уведомления", callback_data="toggle_notifications")],
+        [InlineKeyboardButton("📅 Выбрать дни", callback_data="select_days")],
+        [InlineKeyboardButton("⏰ Выбрать время", callback_data="select_time")],
+        [InlineKeyboardButton("🔙 Назад в главное меню", callback_data="back_to_main")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def show_days_selection(query, user_id):
+    """Показывает выбор дней для уведомлений (включая выходные)"""
+    user_settings = user_notifications.get(str(user_id), {
+        'enabled': False,
+        'days': [],
+        'time': '09:00'
+    })
+    
+    selected_days = user_settings['days']
+    
+    # Все дни недели включая выходные
+    days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    
+    keyboard = []
+    for day in days:
+        emoji = "✅" if day in selected_days else "⚪"
+        keyboard.append([InlineKeyboardButton(f"{emoji} {day}", callback_data=f"notif_day_{day}")])
+    
+    keyboard.append([InlineKeyboardButton("💾 Сохранить", callback_data="save_days")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад к настройкам", callback_data="settings_menu")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "📅 Выберите дни для напоминаний (отмечайте галочкой):\n\n"
+        "✅ - день выбран\n"
+        "⚪ - день не выбран\n\n"
+        "*Примечание:* Напоминания приходят независимо от наличия пар в выбранный день",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def show_time_selection(query, user_id):
+    """Показывает выбор времени для уведомлений с целыми часами"""
+    user_settings = user_notifications.get(str(user_id), {
+        'enabled': False,
+        'days': [],
+        'time': '09:00'
+    })
+    
+    current_time = user_settings['time']
+    
+    # Варианты времени с целыми часами с 00:00 до 23:00
+    keyboard = [
+        [
+            InlineKeyboardButton("⏰ 00:00", callback_data="notif_time_00:00"),
+            InlineKeyboardButton("⏰ 01:00", callback_data="notif_time_01:00"),
+            InlineKeyboardButton("⏰ 02:00", callback_data="notif_time_02:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 03:00", callback_data="notif_time_03:00"),
+            InlineKeyboardButton("⏰ 04:00", callback_data="notif_time_04:00"),
+            InlineKeyboardButton("⏰ 05:00", callback_data="notif_time_05:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 06:00", callback_data="notif_time_06:00"),
+            InlineKeyboardButton("⏰ 07:00", callback_data="notif_time_07:00"),
+            InlineKeyboardButton("⏰ 08:00", callback_data="notif_time_08:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 09:00", callback_data="notif_time_09:00"),
+            InlineKeyboardButton("⏰ 10:00", callback_data="notif_time_10:00"),
+            InlineKeyboardButton("⏰ 11:00", callback_data="notif_time_11:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 12:00", callback_data="notif_time_12:00"),
+            InlineKeyboardButton("⏰ 13:00", callback_data="notif_time_13:00"),
+            InlineKeyboardButton("⏰ 14:00", callback_data="notif_time_14:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 15:00", callback_data="notif_time_15:00"),
+            InlineKeyboardButton("⏰ 16:00", callback_data="notif_time_16:00"),
+            InlineKeyboardButton("⏰ 17:00", callback_data="notif_time_17:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 18:00", callback_data="notif_time_18:00"),
+            InlineKeyboardButton("⏰ 19:00", callback_data="notif_time_19:00"),
+            InlineKeyboardButton("⏰ 20:00", callback_data="notif_time_20:00")
+        ],
+        [
+            InlineKeyboardButton("⏰ 21:00", callback_data="notif_time_21:00"),
+            InlineKeyboardButton("⏰ 22:00", callback_data="notif_time_22:00"),
+            InlineKeyboardButton("⏰ 23:00", callback_data="notif_time_23:00")
+        ],
+        [InlineKeyboardButton("🔙 Назад к настройкам", callback_data="settings_menu")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"⏰ Выберите время для напоминаний:\n\n"
+        f"Текущее время: *{current_time}*\n\n"
+        f"Доступно время с 00:00 до 23:00 (целые часы)",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет напоминания пользователям (работает с выходными)"""
+    try:
+        moscow_tz = timezone(timedelta(hours=3))
+        now = datetime.now(moscow_tz)
+        current_time = now.strftime("%H:%M")
+        
+        # Дни недели на русском (0=понедельник, 6=воскресенье)
+        days_russian = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+        current_day = days_russian[now.weekday()]
+        
+        logger.info(f"🔔 Проверка напоминаний: {current_day} {current_time}")
+        
+        for user_id_str, settings in user_notifications.items():
+            if (settings.get('enabled') and 
+                current_day in settings.get('days', []) and 
+                current_time == settings.get('time')):
+                
+                try:
+                    user_id = int(user_id_str)
+                    # Проверяем, зарегистрирован ли пользователь
+                    if user_id in user_data:
+                        student_data = user_data[user_id]
+                        message = (
+                            f"🔔 *Напоминание о посещаемости*\n\n"
+                            f"Привет, {student_data['fio']}!\n"
+                            f"Не забудь отметить посещаемость на сегодняшние пары.\n\n"
+                            f"Используй команду /start для отметки."
+                        )
+                        
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=message,
+                            parse_mode='Markdown'
+                        )
+                        
+                        logger.info(f"✅ Напоминание отправлено пользователю {user_id}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки напоминания пользователю {user_id_str}: {e}")
+                    
+    except Exception as e:
+        logger.error(f"❌ Ошибка в send_notification_reminders: {e}")
+
+async def toggle_notifications_handler(query, user_id):
+    """Обработчик включения/выключения уведомлений"""
+    user_id_str = str(user_id)
+    if user_id_str not in user_notifications:
+        user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
+    else:
+        user_notifications[user_id_str]['enabled'] = not user_notifications[user_id_str].get('enabled', False)
+    
+    save_notification_settings()  # Сохраняем только при изменении
+    await show_settings(query, user_id)
+
+async def toggle_notification_day(query, user_id, day):
+    """Обработчик переключения дня уведомлений"""
+    user_id_str = str(user_id)
+    
+    if user_id_str not in user_notifications:
+        user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
+    
+    if day in user_notifications[user_id_str]['days']:
+        user_notifications[user_id_str]['days'].remove(day)
+    else:
+        user_notifications[user_id_str]['days'].append(day)
+    
+    save_notification_settings()  # Сохраняем только при изменении
+    await show_days_selection(query, user_id)
+
+async def set_notification_time(query, user_id, time_str):
+    """Обработчик установки времени уведомлений"""
+    user_id_str = str(user_id)
+    
+    if user_id_str not in user_notifications:
+        user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': time_str}
+    else:
+        user_notifications[user_id_str]['time'] = time_str
+    
+    save_notification_settings()  # Сохраняем только при изменении
+    await show_settings(query, user_id)
+
+async def background_notifications():
+    """Фоновая задача для отправки напоминаний"""
+    while True:
+        await asyncio.sleep(60)  # Проверяем каждую минуту
+        try:
+            # Создаем контекст для отправки сообщений
+            from telegram.ext import CallbackContext
+            context = CallbackContext(application=None)
+            await send_notification_reminders(context)
+        except Exception as e:
+            logger.error(f"❌ Ошибка в background_notifications: {e}")
 
 # ОСНОВНЫЕ ФУНКЦИИ БОТА
 @log_execution_time("show_week_selection")
@@ -1582,8 +1886,8 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"temp_all_{day}_excused"),
         ])
         keyboard.append([InlineKeyboardButton("———", callback_data="separator")])
-        # Показываем количество временных изменений
         
+        # Показываем количество временных изменений
         temp_count = len(temp_marks)
         save_button = "💾 Завершить"
         
@@ -1610,10 +1914,14 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
 
         full_subjects_text = "\n".join(subject_lines)
         
+        # ДОБАВЛЯЕМ ВАЖНОЕ НАПОМИНАНИЕ
+        reminder_text = "\n\n⚠️ *ВНИМАНИЕ:* После отметки на всех парах не забудьте нажать кнопку '💾 Завершить' для сохранения изменений!"
+        
         try:
             await query.edit_message_text(
-                f"📚 {day} - {week_type}:\n\n{full_subjects_text}\n\nВыберите предмет для отметки:",
-                reply_markup=reply_markup
+                f"📚 {day} - {week_type}:\n\n{full_subjects_text}{reminder_text}\n\nВыберите предмет для отметки:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
             )
         except Exception as e:
             if "Message is not modified" in str(e):
@@ -1847,7 +2155,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data == "back_to_main":
             # Возвращаем главное меню
-            keyboard = [[InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")]]
+            keyboard = [
+                [InlineKeyboardButton("📝 Отметиться", callback_data="mark_attendance")],
+                [InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")]
+            ]
             if user_id == ADMIN_ID:
                 keyboard.append([InlineKeyboardButton("🛠️ Админ-панель", callback_data="admin_panel")])
             
@@ -1881,6 +2192,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "week_none":
             await query.answer("Эта неделя недоступна для управления наличием пар", show_alert=True)
             return
+        elif data == "settings_menu":
+            await show_settings(query, user_id)
+        elif data == "toggle_notifications":
+            # Включение/выключение уведомлений
+            user_id_str = str(user_id)
+            if user_id_str not in user_notifications:
+                user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
+            else:
+                user_notifications[user_id_str]['enabled'] = not user_notifications[user_id_str].get('enabled', False)
+
+            save_notification_settings()
+            await show_settings(query, user_id)
+        elif data == "select_days":
+            await show_days_selection(query, user_id)
+        elif data == "select_time":
+            await show_time_selection(query, user_id)
+        elif data.startswith("notif_day_"):
+            day = data[10:]  # Извлекаем название дня
+            user_id_str = str(user_id)
+            
+            if user_id_str not in user_notifications:
+                user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
+            if day in user_notifications[user_id_str]['days']:
+                user_notifications[user_id_str]['days'].remove(day)
+            else:
+                user_notifications[user_id_str]['days'].append(day)
+
+            save_notification_settings()
+            await show_days_selection(query, user_id)
+        elif data.startswith("notif_time_"):
+            time_str = data[11:]  # Извлекаем время
+            user_id_str = str(user_id)
+    
+            if user_id_str not in user_notifications:
+                user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': time_str}
+            else:
+                user_notifications[user_id_str]['time'] = time_str
+            save_notification_settings()\
+                
+            await show_settings(query, user_id)
+        elif data == "save_days":
+            await show_settings(query, user_id)
+            
         elif data == "admin_students":
             await admin_show_students(query)
         elif data == "admin_status":
@@ -1892,9 +2246,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "admin_blacklist":
             await admin_blacklist_menu(query)
         elif data == "admin_show_blacklist":
-            await admin_show_blacklist(query)
+            await admin_show_blacklist(query, context)
         elif data == "admin_refresh_blacklist":
-            await admin_refresh_blacklist(query)
+            await admin_refresh_blacklist(query, context)
         elif data == "admin_refresh_cache":
             if user_id == ADMIN_ID:
                 await query.edit_message_text("🔄 Обновление кэша...")
@@ -2070,6 +2424,9 @@ def main():
     send_log_to_server("🚀 ЗАПУСК БОТА: Инициализация...", "system", "info")
     
     try:
+        # Загружаем настройки уведомлений
+        load_notification_settings()
+        
         db = connect_google_sheets()
         if db is None:
             send_log_to_server("💥 КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Google Sheets", "system", "critical")
@@ -2095,10 +2452,11 @@ def main():
 
         logger.info("🤖 Бот запускается...")
         
-        # Запускаем фоновые задачи
+        # Запускаем фоновые задачи (только необходимые)
         loop = asyncio.get_event_loop()
         loop.create_task(background_cleanup())
         loop.create_task(background_blacklist_update())
+        loop.create_task(background_notifications())
         
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
