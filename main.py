@@ -1426,6 +1426,10 @@ async def show_settings(query, user_id):
         await query.edit_message_text("❌ Сначала зарегистрируйтесь через /start")
         return
     
+    # ЛОГИРОВАНИЕ открытия настроек
+    username = query.from_user.username or "Без username"
+    log_user_action(user_id, username, "Открытие меню настроек")
+    
     # Получаем текущие настройки пользователя
     user_settings = user_notifications.get(str(user_id), {
         'enabled': False,
@@ -1601,39 +1605,62 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
 async def toggle_notifications_handler(query, user_id):
     """Обработчик включения/выключения уведомлений"""
     user_id_str = str(user_id)
+    username = query.from_user.username or "Без username"
+    
     if user_id_str not in user_notifications:
         user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
+        new_status = True
     else:
-        user_notifications[user_id_str]['enabled'] = not user_notifications[user_id_str].get('enabled', False)
+        new_status = not user_notifications[user_id_str].get('enabled', False)
+        user_notifications[user_id_str]['enabled'] = new_status
     
-    save_notification_settings()  # Сохраняем только при изменении
+    # ЛОГИРОВАНИЕ
+    status_text = "включены" if new_status else "выключены"
+    log_user_action(user_id, username, f"Уведомления {status_text}")
+    
+    save_notification_settings()
     await show_settings(query, user_id)
 
 async def toggle_notification_day(query, user_id, day):
     """Обработчик переключения дня уведомлений"""
     user_id_str = str(user_id)
+    username = query.from_user.username or "Без username"
     
     if user_id_str not in user_notifications:
         user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': '09:00'}
     
+    old_days = user_notifications[user_id_str]['days'].copy()
+    
     if day in user_notifications[user_id_str]['days']:
         user_notifications[user_id_str]['days'].remove(day)
+        action = "удален"
     else:
         user_notifications[user_id_str]['days'].append(day)
+        action = "добавлен"
     
-    save_notification_settings()  # Сохраняем только при изменении
+    # ЛОГИРОВАНИЕ
+    new_days = user_notifications[user_id_str]['days']
+    log_user_action(user_id, username, f"Изменение дней уведомлений", 
+                   f"день: {day} ({action}), теперь: {', '.join(new_days) if new_days else 'нет дней'}")
+    
+    save_notification_settings()
     await show_days_selection(query, user_id)
 
 async def set_notification_time(query, user_id, time_str):
     """Обработчик установки времени уведомлений"""
     user_id_str = str(user_id)
+    username = query.from_user.username or "Без username"
     
     if user_id_str not in user_notifications:
         user_notifications[user_id_str] = {'enabled': True, 'days': [], 'time': time_str}
     else:
+        old_time = user_notifications[user_id_str].get('time', 'не установлено')
         user_notifications[user_id_str]['time'] = time_str
     
-    save_notification_settings()  # Сохраняем только при изменении
+    # ЛОГИРОВАНИЕ
+    log_user_action(user_id, username, "Изменение времени уведомлений", f"новое время: {time_str}")
+    
+    save_notification_settings()
     await show_settings(query, user_id)
 
 async def background_notifications():
@@ -2197,6 +2224,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Эта неделя недоступна для управления наличием пар", show_alert=True)
             return
         elif data == "settings_menu":
+            log_user_action(user_id, username, "Открытие настроек из главного меню")
             await show_settings(query, user_id)
         elif data == "toggle_notifications":
             # Включение/выключение уведомлений
