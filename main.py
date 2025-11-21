@@ -1434,6 +1434,23 @@ def load_notification_settings():
         logger.error(f"❌ Ошибка загрузки настроек уведомлений: {e}")
         user_notifications = {}
 
+def load_student_from_sheets(user_id):
+    """Загрузка данных студента из Google Sheets по user_id"""
+    try:
+        students_data = get_students_data_optimized()
+        for student in students_data:
+            existing_id = str(student.get('Telegram ID', '')).strip()
+            if existing_id and existing_id.isdigit() and int(existing_id) == user_id:
+                return {
+                    'fio': student['ФИО'],
+                    'number': student['№'],
+                    'subgroup': student['Подгруппа']
+                }
+        return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки студента {user_id} из Google Sheets: {e}")
+        return None
+
 @check_blacklist
 async def check_my_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда для проверки текущих настроек уведомлений"""
@@ -1588,15 +1605,43 @@ async def show_time_selection(query, user_id):
         parse_mode='Markdown'
     )
 
+def reload_notification_settings():
+    """Перезагружает настройки уведомлений из файла"""
+    global user_notifications
+    try:
+        if os.path.exists('notifications.json'):
+            with open('notifications.json', 'r', encoding='utf-8') as f:
+                new_notifications = json.load(f)
+            
+            # Синхронизируем структуру
+            for user_id_str, settings in new_notifications.items():
+                if 'enabled' not in settings:
+                    settings['enabled'] = False
+                if 'days' not in settings:
+                    settings['days'] = []
+                if 'time' not in settings:
+                    settings['time'] = '09:00'
+            
+            # Обновляем глобальную переменную
+            user_notifications.clear()
+            user_notifications.update(new_notifications)
+            logger.info(f"🔄 Настройки уведомлений перезагружены. Пользователей: {len(user_notifications)}")
+        else:
+            logger.warning("📝 Файл notifications.json не найден при перезагрузке")
+    except Exception as e:
+        logger.error(f"❌ Ошибка перезагрузки настроек уведомлений: {e}")
+
 async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Отправляет напоминания пользователям (работает с выходными)"""
     try:
+        # ПЕРЕЗАГРУЖАЕМ НАСТРОЙКИ ИЗ ФАЙЛА ПЕРЕД КАЖДОЙ ПРОВЕРКОЙ
+        reload_notification_settings()
+        
         moscow_tz = timezone(timedelta(hours=3))
         now = datetime.now(moscow_tz)
         current_time = now.strftime("%H:%M")
         current_day_russian = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"][now.weekday()]
         
-        # ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
         logger.info(f"🔔 Проверка напоминаний: {current_day_russian} {current_time}")
         logger.info(f"🔔 Всего пользователей с уведомлениями: {len(user_notifications)}")
         
@@ -1614,26 +1659,36 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"🔔 ОТПРАВКА: пользователь {user_id_str} соответствует условиям!")
                 
                 try:
-                    user_id = int(user_id_str)
-                    if user_id in user_data:
-                        student_data = user_data[user_id]
-                        message = (
-                            f"🔔 *Напоминание о посещаемости*\n\n"
-                            f"Привет, {student_data['fio']}!\n"
-                            f"Не забудь отметить посещаемость на сегодняшние пары.\n\n"
-                            f"Используй команду /start для отметки."
-                        )
-                        
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=message,
-                            parse_mode='Markdown'
-                        )
-                        
-                        logger.info(f"✅ Напоминание отправлено пользователю {user_id}")
-                    else:
-                        logger.warning(f"⚠️ Пользователь {user_id} не найден в user_data")
-                        
+                    user_id_int = int(user_id_str)
+                    
+                    # Если пользователя нет в user_data, загружаем из Google Sheets
+                    if user_id_int not in user_data:
+                        logger.info(f"🔔 Пользователь {user_id_int} не в user_data, загружаем из Google Sheets")
+                        student_data = load_student_from_sheets(user_id_int)
+                        if student_data:
+                            user_data[user_id_int] = student_data
+                            logger.info(f"✅ Данные пользователя {user_id_int} загружены: {student_data['fio']}")
+                        else:
+                            logger.warning(f"⚠️ Пользователь {user_id_int} не найден в Google Sheets")
+                            continue
+                    
+                    # Отправляем уведомление
+                    student_data = user_data[user_id_int]
+                    message = (
+                        f"🔔 *Напоминание о посещаемости*\n\n"
+                        f"Привет, {student_data['fio']}!\n"
+                        f"Не забудь отметить посещаемость на сегодняшние пары.\n\n"
+                        f"Используй команду /start для отметки."
+                    )
+                    
+                    await context.bot.send_message(
+                        chat_id=user_id_int,
+                        text=message,
+                        parse_mode='Markdown'
+                    )
+                    
+                    logger.info(f"✅ Напоминание отправлено пользователю {user_id_int}")
+                    
                 except Exception as e:
                     logger.error(f"❌ Ошибка отправки напоминания пользователю {user_id_str}: {e}")
                     
@@ -2530,6 +2585,19 @@ def main():
     try:
         # Загружаем настройки уведомлений
         load_notification_settings()
+        
+        # ПРЕДЗАГРУЖАЕМ user_data ДЛЯ ПОЛЬЗОВАТЕЛЕЙ С УВЕДОМЛЕНИЯМИ
+        logger.info("🔄 Предзагрузка user_data для пользователей с уведомлениями...")
+        for user_id_str in user_notifications.keys():
+            try:
+                user_id = int(user_id_str)
+                if user_id not in user_data:
+                    student_data = load_student_from_sheets(user_id)
+                    if student_data:
+                        user_data[user_id] = student_data
+                        logger.info(f"✅ Предзагружен пользователь {user_id}: {student_data['fio']}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка предзагрузки пользователя {user_id_str}: {e}")
         
         db = connect_google_sheets()
         if db is None:
