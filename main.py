@@ -1409,11 +1409,15 @@ def load_notification_settings():
     """Простая загрузка настроек уведомлений из файла"""
     global user_notifications
     try:
+        import os
+        current_dir = os.getcwd()
+        logger.info(f"📁 Текущая директория бота: {current_dir}")
+        
         if os.path.exists('notifications.json'):
             with open('notifications.json', 'r', encoding='utf-8') as f:
                 user_notifications = json.load(f)
             
-            # СИНХРОНИЗАЦИЯ: гарантируем правильную структуру для всех пользователей
+            # СИНХРОНИЗАЦИЯ: гарантируем правильную структуру
             for user_id_str, settings in user_notifications.items():
                 if 'enabled' not in settings:
                     settings['enabled'] = False
@@ -1422,13 +1426,34 @@ def load_notification_settings():
                 if 'time' not in settings:
                     settings['time'] = '09:00'
             
-            logger.info(f"✅ Настройки уведомлений загружены и синхронизированы: {len(user_notifications)} пользователей")
+            logger.info(f"✅ Настройки уведомлений загружены: {len(user_notifications)} пользователей")
         else:
             user_notifications = {}
             logger.info("📝 Файл настроек уведомлений не найден, создан новый")
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки настроек уведомлений: {e}")
         user_notifications = {}
+
+@check_blacklist
+async def check_my_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для проверки текущих настроек уведомлений"""
+    user_id = update.effective_user.id
+    user_id_str = str(user_id)
+    
+    if user_id_str in user_notifications:
+        settings = user_notifications[user_id_str]
+        status = "включены" if settings.get('enabled') else "выключены"
+        days = ", ".join(settings.get('days', [])) or "не выбраны"
+        time = settings.get('time', 'не установлено')
+        
+        await update.message.reply_text(
+            f"📊 Ваши настройки уведомлений:\n"
+            f"• Статус: {status}\n"
+            f"• Дни: {days}\n"
+            f"• Время: {time}"
+        )
+    else:
+        await update.message.reply_text("❌ У вас нет настроек уведомлений")
 
 async def show_settings(query, user_id):
     """Показывает меню настроек с обновленной информацией"""
@@ -1569,21 +1594,27 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
         moscow_tz = timezone(timedelta(hours=3))
         now = datetime.now(moscow_tz)
         current_time = now.strftime("%H:%M")
+        current_day_russian = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"][now.weekday()]
         
-        # Дни недели на русском (0=понедельник, 6=воскресенье)
-        days_russian = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
-        current_day = days_russian[now.weekday()]
-        
-        logger.info(f"🔔 Проверка напоминаний: {current_day} {current_time}")
+        # ОТЛАДОЧНОЕ ЛОГИРОВАНИЕ
+        logger.info(f"🔔 Проверка напоминаний: {current_day_russian} {current_time}")
+        logger.info(f"🔔 Всего пользователей с уведомлениями: {len(user_notifications)}")
         
         for user_id_str, settings in user_notifications.items():
-            if (settings.get('enabled') and 
-                current_day in settings.get('days', []) and 
-                current_time == settings.get('time')):
+            user_enabled = settings.get('enabled', False)
+            user_days = settings.get('days', [])
+            user_time = settings.get('time', '09:00')
+            
+            logger.info(f"🔔 Проверка пользователя {user_id_str}: enabled={user_enabled}, days={user_days}, time={user_time}")
+            
+            if (user_enabled and 
+                current_day_russian in user_days and 
+                current_time == user_time):
+                
+                logger.info(f"🔔 ОТПРАВКА: пользователь {user_id_str} соответствует условиям!")
                 
                 try:
                     user_id = int(user_id_str)
-                    # Проверяем, зарегистрирован ли пользователь
                     if user_id in user_data:
                         student_data = user_data[user_id]
                         message = (
@@ -1600,9 +1631,13 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
                         )
                         
                         logger.info(f"✅ Напоминание отправлено пользователю {user_id}")
+                    else:
+                        logger.warning(f"⚠️ Пользователь {user_id} не найден в user_data")
                         
                 except Exception as e:
                     logger.error(f"❌ Ошибка отправки напоминания пользователю {user_id_str}: {e}")
+                    
+        logger.info(f"🔔 Проверка напоминаний завершена")
                     
     except Exception as e:
         logger.error(f"❌ Ошибка в send_notification_reminders: {e}")
@@ -1668,14 +1703,14 @@ async def set_notification_time(query, user_id, time_str):
     save_notification_settings()
     await show_settings(query, user_id)
 
-async def background_notifications():
-    """Фоновая задача для отправки напоминаний"""
+async def background_notifications(application: Application):
+    """Фоновая задача для отправки напоминаний с правильным контекстом"""
     while True:
-        await asyncio.sleep(60)  # Проверяем каждую минуту
+        await asyncio.sleep(60)
         try:
-            # Создаем контекст для отправки сообщений
-            from telegram.ext import CallbackContext
-            context = CallbackContext(application=None)
+            # Создаем контекст из application
+            from telegram.ext import ContextTypes
+            context = ContextTypes.DEFAULT_TYPE(application=application)
             await send_notification_reminders(context)
         except Exception as e:
             logger.error(f"❌ Ошибка в background_notifications: {e}")
@@ -2518,6 +2553,7 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_messages))
         application.add_handler(CommandHandler("update_cache", admin_refresh_cache_command))
         application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(CommandHandler("my_notifications", check_my_notifications))
 
         logger.info("🤖 Бот запускается...")
         
@@ -2525,7 +2561,7 @@ def main():
         loop = asyncio.get_event_loop()
         loop.create_task(background_cleanup())
         loop.create_task(background_blacklist_update())
-        loop.create_task(background_notifications())
+        loop.create_task(background_notifications(application))
         
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
