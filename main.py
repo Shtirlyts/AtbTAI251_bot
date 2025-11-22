@@ -1626,10 +1626,19 @@ def reload_notification_settings():
             user_notifications.clear()
             user_notifications.update(new_notifications)
             logger.info(f"🔄 Настройки уведомлений перезагружены. Пользователей: {len(user_notifications)}")
+            
+            # ЛОГИРУЕМ НА САЙТ
+            send_log_to_server(
+                f"🔄 Настройки уведомлений перезагружены: {len(user_notifications)} пользователей", 
+                "notifications_reload", 
+                "info"
+            )
         else:
             logger.warning("📝 Файл notifications.json не найден при перезагрузке")
+            send_log_to_server("📝 Файл notifications.json не найден", "notifications_warning", "warning")
     except Exception as e:
         logger.error(f"❌ Ошибка перезагрузки настроек уведомлений: {e}")
+        send_log_to_server(f"❌ Ошибка перезагрузки настроек: {e}", "notifications_error", "error")
 
 async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Отправляет напоминания пользователям (работает с выходными)"""
@@ -1645,10 +1654,26 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"🔔 Проверка напоминаний: {current_day_russian} {current_time}")
         logger.info(f"🔔 Всего пользователей с уведомлениями: {len(user_notifications)}")
         
+        # ЛОГИРУЕМ НАЧАЛО ПРОВЕРКИ НА САЙТ
+        send_log_to_server(
+            f"🔔 Начало проверки уведомлений: {current_day_russian} {current_time}, пользователей: {len(user_notifications)}", 
+            "notifications_check", 
+            "info"
+        )
+        
+        notification_stats = {
+            'total_checked': 0,
+            'sent': 0,
+            'errors': 0,
+            'user_details': []
+        }
+        
         for user_id_str, settings in user_notifications.items():
             user_enabled = settings.get('enabled', False)
             user_days = settings.get('days', [])
             user_time = settings.get('time', '09:00')
+            
+            notification_stats['total_checked'] += 1
             
             logger.info(f"🔔 Проверка пользователя {user_id_str}: enabled={user_enabled}, days={user_days}, time={user_time}")
             
@@ -1670,6 +1695,8 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
                             logger.info(f"✅ Данные пользователя {user_id_int} загружены: {student_data['fio']}")
                         else:
                             logger.warning(f"⚠️ Пользователь {user_id_int} не найден в Google Sheets")
+                            notification_stats['errors'] += 1
+                            notification_stats['user_details'].append(f"{user_id_str}: не найден в БД")
                             continue
                     
                     # Отправляем уведомление
@@ -1687,15 +1714,48 @@ async def send_notification_reminders(context: ContextTypes.DEFAULT_TYPE):
                         parse_mode='Markdown'
                     )
                     
+                    # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ НА САЙТ
+                    user_log_message = (
+                        f"✅ Уведомление отправлено: ID:{user_id_int} "
+                        f"ФИО:{student_data['fio']} "
+                        f"Подгруппа:{student_data['subgroup']} "
+                        f"Время:{user_time} Дни:{user_days}"
+                    )
+                    send_log_to_server(user_log_message, "notification_sent", "info")
+                    
                     logger.info(f"✅ Напоминание отправлено пользователю {user_id_int}")
+                    notification_stats['sent'] += 1
+                    notification_stats['user_details'].append(f"{user_id_str}: отправлено ({student_data['fio']})")
                     
                 except Exception as e:
-                    logger.error(f"❌ Ошибка отправки напоминания пользователю {user_id_str}: {e}")
-                    
+                    error_msg = f"❌ Ошибка отправки пользователю {user_id_str}: {e}"
+                    logger.error(error_msg)
+                    send_log_to_server(error_msg, "notification_error", "error")
+                    notification_stats['errors'] += 1
+                    notification_stats['user_details'].append(f"{user_id_str}: ошибка - {str(e)[:50]}")
+        
+        # ФИНАЛЬНОЕ ЛОГИРОВАНИЕ СТАТИСТИКИ НА САЙТ
+        stats_message = (
+            f"📊 Статистика уведомлений: "
+            f"Проверено: {notification_stats['total_checked']}, "
+            f"Отправлено: {notification_stats['sent']}, "
+            f"Ошибок: {notification_stats['errors']}"
+        )
+        send_log_to_server(stats_message, "notifications_summary", "info")
+        
+        # Детальная информация для отладки
+        if notification_stats['user_details']:
+            details_message = "👤 Детали: " + ", ".join(notification_stats['user_details'][:5])  # Первые 5 чтобы не перегружать
+            if len(notification_stats['user_details']) > 5:
+                details_message += f" ... и еще {len(notification_stats['user_details']) - 5}"
+            send_log_to_server(details_message, "notifications_details", "info")
+        
         logger.info(f"🔔 Проверка напоминаний завершена")
                     
     except Exception as e:
-        logger.error(f"❌ Ошибка в send_notification_reminders: {e}")
+        error_msg = f"❌ Ошибка в send_notification_reminders: {e}"
+        logger.error(error_msg)
+        send_log_to_server(error_msg, "notifications_system_error", "error")
 
 async def toggle_notifications_handler(query, user_id):
     """Обработчик включения/выключения уведомлений"""
