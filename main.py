@@ -2008,9 +2008,6 @@ async def show_subjects(query, day, user_id, week_string=None, context=None):
             InlineKeyboardButton("✅ Прис. на всех", callback_data=f"temp_all_{day}_present"),
             InlineKeyboardButton("❌ Отсут. на всех", callback_data=f"temp_all_{day}_absent")
         ])
-        keyboard.append([
-            InlineKeyboardButton("⚠️ Отсут. на всех(У)", callback_data=f"temp_all_{day}_excused"),
-        ])
         keyboard.append([InlineKeyboardButton("———", callback_data="separator")])
         
         # Показываем количество временных изменений
@@ -2067,9 +2064,6 @@ async def show_subject_actions(query, day, row_num):
         [
             InlineKeyboardButton("✅ Присутствовал", callback_data=f"action_{day}_{row_num}_present"),
             InlineKeyboardButton("❌ Отсутствовал", callback_data=f"action_{day}_{row_num}_absent")
-        ],
-        [
-            InlineKeyboardButton("⚠️ Отсутствовал(У)", callback_data=f"action_{day}_{row_num}_excused"),
         ],
         [
             InlineKeyboardButton("🔙 Назад", callback_data=f"back_to_subjects_{day}")
