@@ -386,49 +386,63 @@ def get_week_status(user_id, week_string):
         return '❓'
 
 def update_cache():
-    """Обновление всего кеша"""
+    """Обновление всего кеша включая расписание"""
     try:
-        logger.info("🔄 Начало обновления кеша...")
+        logger.info("🔄 Начало полного обновления кеша...")
         
-        # Обновляем черный список с принудительным обновлением
+        # 1. ПОЛНОСТЬЮ сбрасываем предзагруженные данные
+        preloaded_data['students'] = None
+        preloaded_data['schedule_1'] = None  
+        preloaded_data['schedule_2'] = None
+        preloaded_data['blacklist'] = None
+        preloaded_data['last_loaded'] = 0
+        
+        # 2. Обновляем черный список
         old_blacklist_count = len(cache['blacklist'])
-        new_blacklist = get_blacklist_data(force_refresh=True)  # ← ДОБАВИЛ force_refresh=True
+        new_blacklist = get_blacklist_data(force_refresh=True)
         cache['blacklist'] = new_blacklist
         new_blacklist_count = len(new_blacklist)
         
-        # Обновляем week_strings (очищаем старые данные)
+        # 3. Очищаем кеш недель
         old_week_strings_count = len(cache['week_strings'])
         cache['week_strings'] = {}
         
-        # Получаем актуальные данные для логирования
+        # 4. ПРИНУДИТЕЛЬНО загружаем свежие данные расписания
+        logger.info("🔄 Принудительная перезагрузка расписания...")
         students_data = get_students_data_optimized()
         schedule_1_data = get_schedule_data_optimized(1)
         schedule_2_data = get_schedule_data_optimized(2)
+        
+        # 5. Обновляем preloaded_data с новым временем
+        preloaded_data['students'] = students_data
+        preloaded_data['schedule_1'] = schedule_1_data
+        preloaded_data['schedule_2'] = schedule_2_data  
+        preloaded_data['blacklist'] = new_blacklist
+        preloaded_data['last_loaded'] = time.time()
         
         students_count = len(students_data) if students_data else 0
         schedule1_count = len(schedule_1_data) if schedule_1_data else 0
         schedule2_count = len(schedule_2_data) if schedule_2_data else 0
         
-        logger.info("🔄 Кеш успешно обновлен")
+        logger.info("🔄 Полное обновление кеша завершено")
         logger.info(f"📊 Загружено: {students_count} студентов, "
                    f"{schedule1_count} строк расписания 1, "
                    f"{schedule2_count} строк расписания 2, "
                    f"{new_blacklist_count} ID в черном списке")
         
-        # Логируем изменения
         if old_blacklist_count != new_blacklist_count:
             logger.info(f"📈 Изменения в черном списке: было {old_blacklist_count}, стало {new_blacklist_count}")
         
         send_log_to_server(
-            f"🔄 Кеш обновлен: {students_count} студентов, {schedule1_count} строк расписания 1, {schedule2_count} строк расписания 2, {new_blacklist_count} ID в черном списке", 
+            f"🔄 ПОЛНОЕ обновление кеша: {students_count} студентов, {schedule1_count} строк расписания 1, {schedule2_count} строк расписания 2, {new_blacklist_count} ID в черном списке", 
             "cache_update", 
             "info"
         )
         
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка обновления кеша: {e}")
-        send_log_to_server(f"❌ Ошибка обновления кеша: {e}", "cache_error", "error")
+        logger.error(f"❌ Ошибка полного обновления кеша: {e}")
+        send_log_to_server(f"❌ Ошибка полного обновления кеша: {e}", "cache_error", "error")
         return False
 
 # RATE LIMITER 
@@ -2642,6 +2656,13 @@ def main():
             if db is None:
                 logger.critical("💥 Бот не может работать без подключения к Google Sheets")
                 return
+        
+        logger.info("🔄 Принудительное обновление кеша при запуске...")
+        if not update_cache():
+            logger.warning("⚠️ Не удалось обновить кеш при запуске, пробуем предзагрузку...")
+            preload_frequent_data()
+        else:
+            logger.info("✅ Кеш успешно обновлен при запуске")
         
         # Предзагрузка данных
         preload_frequent_data()
